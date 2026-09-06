@@ -21,6 +21,7 @@ export type MappingSuggestion = {
   writable: boolean;
   accepted: boolean;
   reason: string;
+  filled?: number; // how many real numeric cells the mapped range holds (used to pick the best row per concept)
 };
 
 export type SheetPreview = { name: string; values: unknown[][] };
@@ -56,13 +57,15 @@ const metricDictionary: Array<{
   label: string;
   terms: RegExp[];
   writable?: boolean;
+  exclude?: RegExp; // skip this concept when the label also matches this (kills look-alikes, e.g. "pre-capex")
 }> = [
   { module: "cashFlow", metric: "opening_cash", label: "Opening cash", terms: [/opening cash|beginning cash|cash at start/i] },
   { module: "cashFlow", metric: "closing_cash", label: "Closing cash", terms: [/closing cash|ending cash|cash at end/i] },
   { module: "cashFlow", metric: "net_cash", label: "Net cash movement", terms: [/net cash|net change.*cash|change in cash/i] },
+  { module: "cashFlow", metric: "operating_cash_flow", label: "Operating cash flow", terms: [/operating cash flow|cash from operations|cash generated from operations|\bocf\b/i] },
   { module: "cashFlow", metric: "customer_cash", label: "Customer collections", terms: [/collections from customers|customer receipts|collections received|cash received from customers/i] },
   { module: "cashFlow", metric: "supplier_cash", label: "Supplier payments", terms: [/payments to suppliers|supplier payments|payments made|vendor payments/i] },
-  { module: "cashFlow", metric: "capex", label: "Capital expenditure", terms: [/capital expenditure|\bcapex\b|purchase of fixed assets/i] },
+  { module: "cashFlow", metric: "capex", label: "Capital expenditure", terms: [/capital expenditure|\bcapex\b|purchase of fixed assets/i], exclude: /operating cash flow|pre[\s-]?capex|before capex|ex[\s-]?capex|excluding capex|post[\s-]?capex|net of capex/i },
   { module: "cashFlow", metric: "debt_service", label: "Debt service", terms: [/debt service|principal repayment|loan repayment|interest paid|interest expense/i] },
   { module: "collections", metric: "dso", label: "DSO / collection days", terms: [/\bdso\b|debtor days|collection days|receivable days/i], writable: true },
   { module: "collections", metric: "receivables", label: "Closing receivables", terms: [/closing receivables|trade debtors|accounts receivable|closing ar/i] },
@@ -148,6 +151,7 @@ export function buildMappingSuggestions(tabs: SheetPreview[], assignments: Sourc
       metricDictionary.filter((metric) => metric.module === module.id).forEach((metric) => {
         const matchedTerms = metric.terms.filter((term) => term.test(label));
         if (!matchedTerms.length) return;
+        if (metric.exclude && metric.exclude.test(label)) return;
         if (["dso", "dpo", "dio"].includes(metric.metric) && /cash conversion|dso\s*\+.*dpo/i.test(label)) return;
         const hasTimeline = !!time && row.slice(time.start, time.end + 1).some((cell) => cell !== "" && cell !== null && cell !== undefined);
         let start = hasTimeline && time ? time.start : Math.min(row.length - 1, labelColumn + 1);
@@ -158,6 +162,7 @@ export function buildMappingSuggestions(tabs: SheetPreview[], assignments: Sourc
           if (inputIndex >= 0) { start = end = inputIndex; inputFound = true; }
         }
         if (!hasTimeline && !inputFound) return;
+        const filled = row.slice(start, end + 1).filter((cell) => typeof cell === "number" && Number.isFinite(cell)).length;
         const confidence = Math.min(99, 64 + matchedTerms.length * 12 + (hasTimeline ? 10 : 0) + (metric.writable && start === end ? 8 : 0));
         suggestions.push({
           id: `${module.id}:${metric.metric}:${sheet}:${rowIndex + 1}`,
@@ -170,6 +175,7 @@ export function buildMappingSuggestions(tabs: SheetPreview[], assignments: Sourc
           writable: !!metric.writable && inputFound,
           accepted: confidence >= 75,
           reason: `${metric.label} matched from “${label}”${hasTimeline ? " across the detected timeline" : ""}`,
+          filled,
         });
       });
     });
@@ -202,7 +208,19 @@ export function buildMappingSuggestions(tabs: SheetPreview[], assignments: Sourc
       }
     }
   });
-  return suggestions.sort((a, b) => b.confidence - a.confidence);
+  // Keep only the single best row per concept: highest confidence, then the row
+  // that actually holds the most numeric values (a real monthly series beats a
+  // one-off KPI cell). Ties keep the earliest row, encountered first.
+  const bestByConcept = new Map<string, MappingSuggestion>();
+  for (const suggestion of suggestions) {
+    const key = `${suggestion.module}:${suggestion.metric}`;
+    const current = bestByConcept.get(key);
+    const isBetter = !current
+      || suggestion.confidence > current.confidence
+      || (suggestion.confidence === current.confidence && (suggestion.filled ?? 0) > (current.filled ?? 0));
+    if (isBetter) bestByConcept.set(key, suggestion);
+  }
+  return [...bestByConcept.values()].sort((a, b) => b.confidence - a.confidence);
 }
 
 export function moduleLabel(id: SourceModuleId) {
