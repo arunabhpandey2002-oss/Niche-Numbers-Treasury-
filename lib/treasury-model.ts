@@ -116,34 +116,97 @@ function cashBridgeCategory(label: string) {
   if (/drawdown|debt proceeds|new borrowing|loan proceeds|revolver draw|facility draw/i.test(label)) return "Debt drawdowns";
   if (/interest paid|cash interest|interest expense|commitment fee|lease interest/i.test(label)) return "Interest & fees";
   if (/equity|capital raise|cash injection|intercompany funding|share issue/i.test(label)) return "Equity & funding";
-  if (/customer|collection|receipt|billings|sales proceeds|management fee income/i.test(label)) return "Customer collections";
-  if (/supplier|vendor|creditor|trade payable|payments made|discount captured/i.test(label)) return "Supplier payments";
-  if (/payroll|salar|wages|bonus|employee|staff|headcount|people cost/i.test(label)) return "People costs";
-  if (/income tax|corporate tax|tax paid/i.test(label)) return "Taxes";
+  if (/customer|collection|receipt|billings|sales proceeds|management fee income|revenue|\bsales\b|turnover|less:\s*returns|less:\s*discount|sales return|customer discount/i.test(label)) return "Customer collections";
+  if (/payroll|salar|wages|bonus|employee|staff|headcount|people cost|leadership|team/i.test(label)) return "People costs";
+  if (/supplier|vendor|creditor|trade payable|payments made|discount captured|cost of goods|\bcogs\b|\bcosts?\b|purchases?|inventory|materials|shipping|freight|logistics|reverse logistics/i.test(label)) return "Supplier payments";
+  if (/income tax|corporate tax|tax paid|\btax\b/i.test(label)) return "Taxes";
   if (/capex|capital expenditure|fixed asset|equipment purchase/i.test(label) && !/operating cash flow|pre[\s-]?capex|ex[\s-]?capex/i.test(label)) return "Capital expenditure";
   if (/acquisition|investment purchase/i.test(label)) return "Acquisitions & investments";
   if (/interest received|interest income|other income|grant received/i.test(label)) return "Other inflows";
-  if (/rent|insurance|cash operating|operating expense|opex|professional fee|marketing|software|subscription|utilities|cloud|infra|hosting|g&a|general|admin|overhead|management fee to/i.test(label)) return "Other operating costs";
+  if (/rent|insurance|cash operating|operating expense|opex|professional fee|legal|compliance|marketing|branding|software|saas|subscription|utilities|phone|internet|cloud|infra|hosting|travel|conveyance|banking|\bfees\b|contingency|g&a|general|admin|overhead|management fee to/i.test(label)) return "Other operating costs";
   if (/fx|foreign exchange|currency translation/i.test(label)) return "FX movement";
   return "Other cash movement";
 }
 
-export function buildCashBridge(rows: ScanRow[], start: number, end: number): CashBridgeStep[] {
-  const openingRow = rows.find((row) => openingCashPattern.test(row.label));
-  const closingRow = rows.find((row) => closingCashPattern.test(row.label));
+export type CashRole = "in" | "out" | "ignore";
+// Derived / subtotal / memo rows that must never count as a primitive cash movement.
+const EXCLUDED_BRIDGE = /net change|net cash|change in cash|operating cash flow|cash from operations|free cash flow|\bfcf\b|cumulative|running total|net burn|for avg|minimum cash|cash buffer|\bbuffer\b|headroom|coverage|\bdscr\b|\bratio\b|gross margin|operating margin|\bebitda\b|gross profit|operating profit|net profit|memo|non-cash|reconcil|\bcheck\b|\bkpi\b|subtotal|sub-total|^total\b|total cash|cash conversion|closing debt|opening debt|percentage|\bdays\b/i;
+// Driver / ratio / count rows: these are model inputs, not cash movements, so they
+// are never offered as cash-flow line items.
+const NON_CASH_LINE = /%|per unit|per seat|per month|per account|number of|no\. of|headcount|head count|growth rate|\brate\b|efficiency|lag in|lead time|as a %|conversion|utilisation|utilization|multiplier|\bindex\b|\bmargin\b|\bdso\b|\bdpo\b|\bdio\b/i;
+
+function inflowKeyword(label: string) {
+  return /collection|receipt|received|drawdown|borrowing|proceeds|funding|equity|capital raise|cash injection|interest income|management fee income|inflow|revenue|billing|sales(?! incentive)|income(?! tax)/i.test(label);
+}
+function outflowKeyword(label: string) {
+  return /payment|paid|repayment|amorti[sz]ation|capex|capital expenditure|purchase|acquisition|payroll|salar|wages|bonus|\btax\b|insurance|rent|interest expense|interest paid|supplier|vendor|creditor|opex|operating expense|commitment fee|lease|\bcost\b|\bcogs\b|expense|outflow|marketing|branding|cloud|infra|software|saas|legal|compliance|admin|overhead|shipping|logistics|freight|discount|returns|contingency|travel|conveyance|banking|fees|utilities|phone|internet|employee/i.test(label);
+}
+
+// True when a row is a plausible cash-flow line the user might tag. Excludes the
+// assumptions/driver sheet, ratio/count rows, subtotals and the opening/closing balances.
+export function isCashCandidate(row: ScanRow, assumptionsSheet?: string): boolean {
+  if (assumptionsSheet && row.sheet === assumptionsSheet) return false;
+  if (!row.values.some((v) => Math.abs(v) > 0.01)) return false;
+  if (!/[a-z]/i.test(row.label)) return false;   // numeric-only labels are parse artefacts, not real lines
+  if (NON_CASH_LINE.test(row.label)) return false;
+  if (openingCashPattern.test(row.label) || closingCashPattern.test(row.label)) return false;
+  if (EXCLUDED_BRIDGE.test(row.label)) return false;
+  return true;
+}
+
+export function cashCandidateRows(rows: ScanRow[], assumptionsSheet?: string): ScanRow[] {
+  return rows.filter((row) => isCashCandidate(row, assumptionsSheet));
+}
+
+// Smart first-pass roles across the candidate rows. Revenue-like lines are tagged as
+// inflows, cost/expense lines as outflows, and anything ambiguous is left "ignore"
+// (safer than guessing) for the user to opt in from the cash-flow editor.
+export function defaultCashRoles(rows: ScanRow[], assumptionsSheet?: string): Record<string, CashRole> {
+  const roles: Record<string, CashRole> = {};
+  rows.forEach((row) => {
+    if (!isCashCandidate(row, assumptionsSheet)) { roles[row.id] = "ignore"; return; }
+    const sect = row.section.toLowerCase();
+    if (outflowKeyword(row.label)) roles[row.id] = "out";
+    else if (inflowKeyword(row.label)) roles[row.id] = "in";
+    else if (/inflow|collection|receipt|revenue|income/.test(sect)) roles[row.id] = "in";
+    else if (/outflow|cost|expense|payment|spend/.test(sect)) roles[row.id] = "out";
+    else roles[row.id] = "ignore";
+  });
+  return roles;
+}
+
+export type CustomCashLine = { id: string; name: string; role: CashRole; monthly: number };
+
+export function buildCashBridge(
+  rows: ScanRow[],
+  start: number,
+  end: number,
+  opts?: { roles?: Record<string, CashRole>; openingId?: string; closingId?: string; customLines?: CustomCashLine[] },
+): CashBridgeStep[] {
+  const roles = opts?.roles;
+  // In curated mode the user picks opening/closing explicitly; only fall back to
+  // pattern matching when they haven't (or in fully-automatic mode).
+  const openingRow = (opts?.openingId ? rows.find((row) => row.id === opts.openingId) : undefined) || (opts?.openingId === undefined ? rows.find((row) => openingCashPattern.test(row.label)) : undefined);
+  const closingRow = (opts?.closingId ? rows.find((row) => row.id === opts.closingId) : undefined) || (opts?.closingId === undefined ? rows.find((row) => closingCashPattern.test(row.label)) : undefined);
   const opening = openingRow?.values[start] ?? 0;
-  const closing = closingRow?.values[end] ?? 0;
-  // Skip every derived / subtotal / memo row — only primitive cash movements belong in a direct-method bridge.
-  const excluded = /net change|net cash|change in cash|operating cash flow|cash from operations|free cash flow|\bfcf\b|cumulative|running total|net burn|for avg|minimum cash|cash buffer|\bbuffer\b|headroom|coverage|\bdscr\b|\bratio\b|gross margin|operating margin|\bebitda\b|gross profit|operating profit|net profit|memo|non-cash|reconcil|\bcheck\b|\bkpi\b|subtotal|sub-total|^total\b|total cash|cash conversion|closing debt|opening debt|rate|percentage|\bdays\b/i;
   const buckets = new Map<string, { value: number; rows: string[] }>();
 
   rows.forEach((row) => {
-    if (row === openingRow || row === closingRow || openingCashPattern.test(row.label) || closingCashPattern.test(row.label) || excluded.test(row.label)) return;
+    if (row === openingRow || row === closingRow) return;
     const raw = periodTotal(row, start, end);
     if (Math.abs(raw) <= .01) return;
+    let signed: number;
+    if (roles) {
+      const role = roles[row.id];
+      if (role !== "in" && role !== "out") return;          // ignored or untagged rows never enter the bridge
+      signed = role === "in" ? Math.abs(raw) : -Math.abs(raw);
+    } else {
+      if (openingCashPattern.test(row.label) || closingCashPattern.test(row.label) || EXCLUDED_BRIDGE.test(row.label)) return;
+      signed = cashDirection(row.label, raw, row.section);
+    }
     const name = cashBridgeCategory(row.label);
     const bucket = buckets.get(name) || { value: 0, rows: [] };
-    bucket.value += cashDirection(row.label, raw, row.section);
+    bucket.value += signed;
     bucket.rows.push(row.label);
     buckets.set(name, bucket);
   });
@@ -153,11 +216,24 @@ export function buildCashBridge(rows: ScanRow[], start: number, end: number): Ca
     const bucket = buckets.get(name);
     return bucket && Math.abs(bucket.value) > .01 ? [{ name, value: bucket.value, rows: bucket.rows }] : [];
   });
-  const expected = opening + movements.reduce((sum, step) => sum + step.value, 0);
-  const reconciliation = closing - expected;
+
+  // Manually-added lines each become their own labelled step (a flat monthly amount over the window).
+  const months = Math.max(1, end - start + 1);
+  const customSteps = (opts?.customLines || [])
+    .filter((line) => (line.role === "in" || line.role === "out") && Math.abs(line.monthly) > .0001)
+    .map((line) => ({ name: line.name || "Custom line", value: (line.role === "in" ? 1 : -1) * Math.abs(line.monthly) * months, rows: ["Manual entry"] }));
+
+  const allMovements = [...movements, ...customSteps];
+  const movementSum = allMovements.reduce((sum, step) => sum + step.value, 0);
+  const derivedClosing = opening + movementSum;
+  // With no closing-cash row, the bridge is a complete sources-and-uses view:
+  // closing is derived from the movements, so there is never a reconciliation gap.
+  const hasClosing = !!closingRow;
+  const closing = hasClosing ? (closingRow!.values[end] ?? 0) : derivedClosing;
+  const reconciliation = hasClosing ? closing - derivedClosing : 0;
   return [
     { name: "Opening cash", value: opening, total: true, rows: openingRow ? [openingRow.label] : [] },
-    ...movements,
+    ...allMovements,
     ...(Math.abs(reconciliation) > .01 ? [{ name: "Unmapped / reconciliation", value: reconciliation, rows: [] }] : []),
     { name: "Closing cash", value: closing, total: true, rows: closingRow ? [closingRow.label] : [] },
   ];
@@ -200,8 +276,9 @@ function periodLabel(value: unknown) {
     const first=Number(numericDate[1]),second=Number(numericDate[2]),rawYear=Number(numericDate[3]),yearValue=rawYear<100?2000+rawYear:rawYear,monthValue=first>12?second:first;
     if (monthValue>=1&&monthValue<=12&&yearValue>=2000&&yearValue<=2100) return new Date(Date.UTC(yearValue,monthValue-1,1)).toLocaleDateString("en-US", { month: "short", year: "2-digit", timeZone: "UTC" });
   }
-  if (/^\d{4}[-/]\d{1,2}(?:[-/]\d{1,2})?(?:t.*)?$/i.test(s)) {
-    const parsed = new Date(s);
+  if (/^\d{4}[-/]\d{1,2}(?:[-/]\d{1,2})?(?:[t ].*)?$/i.test(s)) {
+    const isoLike = s.replace(" ", "T");
+    const parsed = new Date(/t/i.test(isoLike) ? isoLike : `${isoLike}T00:00:00Z`);
     if (!Number.isNaN(parsed.getTime()) && parsed.getUTCFullYear() >= 2000 && parsed.getUTCFullYear() <= 2100) return parsed.toLocaleDateString("en-US", { month: "short", year: "2-digit", timeZone: "UTC" });
   }
   return "";
@@ -484,6 +561,16 @@ function detectModules(sheetNames: string[], rowText: string[]): ModuleId[] {
   return found;
 }
 
+// True when a tab has a row of >=2 recognisable month/period headers.
+function tabHasTimeline(values: unknown[][]): boolean {
+  const grid = values || [];
+  for (let r = 0; r < Math.min(60, grid.length); r++) {
+    const hits = (grid[r] || []).filter((v) => periodLabel(v)).length;
+    if (hits >= 2) return true;
+  }
+  return false;
+}
+
 export function parseWorkbook(workbook: string, tabs: { name: string; values: unknown[][] }[], selectedSources?: SourceAssignments): ScanResult {
   const rows: ScanRow[] = [];
   const sourceResolution = selectedSources ? resolveSources(tabs, selectedSources) : resolveSources(tabs, Object.fromEntries([
@@ -492,6 +579,11 @@ export function parseWorkbook(workbook: string, tabs: { name: string; values: un
   ]) as SourceAssignments);
   const activeSheets = new Set(Object.values(sourceResolution.resolved).filter((value) => value !== "__skip__" && value !== "__auto__"));
   const activeTabs = tabs.filter((tab) => activeSheets.has(tab.name));
+  // Also scan any tab that clearly has a month timeline but wasn't matched to a
+  // known module (e.g. a plain "P&L"). Its rows become available for the
+  // cash-flow curation editor without changing module detection.
+  const extraTimelinedTabs = tabs.filter((tab) => !activeSheets.has(tab.name) && tabHasTimeline(tab.values));
+  const scanTabs = [...activeTabs, ...extraTimelinedTabs];
   const collectionTabs = activeTabs.filter((tab) => tab.name === sourceResolution.resolved.collections);
   const payableTabs = activeTabs.filter((tab) => tab.name === sourceResolution.resolved.payables);
   const invoiceCollections = collectionTabs.flatMap(parseCollectionsFromTab);
@@ -501,7 +593,7 @@ export function parseWorkbook(workbook: string, tabs: { name: string; values: un
   const widePayments = payableTabs.flatMap(parseWidePaymentsFromTab);
   const payments = invoicePayments.length ? invoicePayments : widePayments;
   let bestPeriods: string[] = [];
-  for (const tab of activeTabs) {
+  for (const tab of scanTabs) {
     const grid = tab.values || [];
     const tabText = grid.slice(0, 8).flat().map((cell) => String(cell ?? "")).join(" | ");
     const tabCurrency = currencyFrom(tabText, "USD"), tabUnit = unitFrom(tabText, tabCurrency);
@@ -545,7 +637,7 @@ export function parseWorkbook(workbook: string, tabs: { name: string; values: un
   if (collections.length && !modules.includes("collections")) modules.push("collections");
   if (payments.length && !modules.includes("payables")) modules.push("payables");
   const mappings = buildMappingSuggestions(activeTabs, sourceResolution.resolved);
-  return { schemaVersion: SCAN_SCHEMA_VERSION, workbook, scannedAt: new Date().toISOString(), periods: bestPeriods, sheets: activeTabs.map((t) => t.name), modules, rows, collections, payments, sourceAssignments: sourceResolution.resolved, sourceScores: sourceResolution.scores, mappings };
+  return { schemaVersion: SCAN_SCHEMA_VERSION, workbook, scannedAt: new Date().toISOString(), periods: bestPeriods, sheets: scanTabs.map((t) => t.name), modules, rows, collections, payments, sourceAssignments: sourceResolution.resolved, sourceScores: sourceResolution.scores, mappings };
 }
 
 /** Recover supplier-by-month records from persisted scan rows created before
