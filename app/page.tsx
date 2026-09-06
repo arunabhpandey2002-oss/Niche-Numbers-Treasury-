@@ -224,8 +224,15 @@ export default function Home() {
   const entityOptions=allEntities(scan).length?allEntities(scan):["Group"];
   const availableInputs=(scan?.rows||[]).filter((row)=>row.inputCell&&Number.isFinite(row.inputValue)).filter((row,index,array)=>array.findIndex((candidate)=>candidate.inputCell===row.inputCell)===index);
   const cashAssumptionsSheet=scan?.sourceAssignments?.assumptions;
-  const cashRows:ScanRow[]=scan?cashCandidateRows(scan.rows,cashAssumptionsSheet):[];
-  const cashBalanceRows:ScanRow[]=scan?scan.rows.filter((row)=>/[a-z]/i.test(row.label)&&row.values.some((v)=>Math.abs(v)>0.01)&&row.sheet!==cashAssumptionsSheet):[];
+  // Scope the cash-flow lines to a single tab/unit. If the model has a real cash-flow
+  // statement, use only that tab (so a ₹-crore cash tab is never mixed with a raw-₹ P&L);
+  // otherwise fall back to every timelined tab (e.g. a P&L-only model with no cash statement).
+  const cashSheet=scan?.sourceAssignments?.cashFlow;
+  const cashSheetRows:ScanRow[]=scan&&cashSheet&&cashSheet!=="__auto__"&&cashSheet!=="__skip__"?scan.rows.filter((row)=>row.sheet===cashSheet):[];
+  const useCashTab=cashCandidateRows(cashSheetRows,cashAssumptionsSheet).length>=3;
+  const cashScopeRows:ScanRow[]=scan?(useCashTab?cashSheetRows:scan.rows):[];
+  const cashRows:ScanRow[]=cashCandidateRows(cashScopeRows,cashAssumptionsSheet);
+  const cashBalanceRows:ScanRow[]=cashScopeRows.filter((row)=>/[a-z]/i.test(row.label)&&row.values.some((v)=>Math.abs(v)>0.01)&&row.sheet!==cashAssumptionsSheet);
   const bridgeOpts={roles:config.cashRoles,openingId:config.cashOpeningId,closingId:config.cashClosingId,customLines:config.customCashLines};
   const cashSource=scan?.sourceAssignments?.cashFlow,consolidatedRows=scan?.rows.filter((r)=>r.sheet===cashSource)||[],groupCashRow=consolidatedRows.find((r)=>/consolidated ending cash|ending cash|closing cash/i.test(r.label)),groupMoveRow=consolidatedRows.find((r)=>/net change|net cash movement|change in cash/i.test(r.label)),groupCash=groupCashRow?.values[last],groupMove=groupMoveRow?.values[last],groupUnit=groupCashRow?.unit||"model units";
   const liquidityRows=scan?.rows.filter((r)=>(r.sheet==="Liquidity"||/liquidity/i.test(r.section))&&/headroom/i.test(r.label))||[],breaches=liquidityRows.filter((r)=>(r.values[last]??0)<0).length;
