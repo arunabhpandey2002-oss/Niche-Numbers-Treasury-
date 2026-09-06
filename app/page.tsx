@@ -11,7 +11,7 @@ import { Slider } from "@/components/ui/slider";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { CashFlowModule, CovenantsModule, Coverage, CustomerCollectionsModule, DebtModule, DetectedScheduleModule, LiquidityModule, SupplierPaymentsModule, WorkingCapitalModule } from "@/components/treasury-module-views";
-import { SCAN_SCHEMA_VERSION, ScanResult, allEntities, cashCandidateRows, defaultCashRoles, driverRows, parseWorkbook, type CashRole, type CustomCashLine, type ScanRow } from "@/lib/treasury-model";
+import { SCAN_SCHEMA_VERSION, ScanResult, allEntities, cashBalanceCandidateRows, cashCandidateRows, defaultCashRoles, driverRows, parseWorkbook, scenarioCashPath, selectCashBalanceRow, type CashRole, type CustomCashLine, type ScanRow } from "@/lib/treasury-model";
 import { ModelMappingWorkbench } from "@/components/model-mapping-workbench";
 import { MappingFallback } from "@/components/mapping-fallback";
 import { CashFlowEditor } from "@/components/cash-flow-editor";
@@ -77,6 +77,22 @@ function scanMetric(scan: ScanResult | null, entity: string, index: number, patt
   const row = candidates.find((r) => r.entity === entity) || candidates.find((r) => r.entity === "Consolidated") || candidates.find((r) => r.entity === "Group") || candidates[0];
   const value = row?.values[index];
   return Number.isFinite(value) ? value : null;
+}
+function unitScale(unit: string) {
+  if (/crore|\bcr\b/i.test(unit)) return 1e7;
+  if (/lakh|lac/i.test(unit)) return 1e5;
+  if (/million|\bmn\b/i.test(unit)) return 1e6;
+  if (/000s|thousand/i.test(unit)) return 1e3;
+  return 1;
+}
+function convertedSeries(row: ScanRow | undefined, targetUnit: string, length: number) {
+  if (!row) return Array(length).fill(0) as number[];
+  const factor=unitScale(row.unit)/unitScale(targetUnit);
+  return Array.from({length},(_,index)=>(row.values[index]||0)*factor);
+}
+function preferredSeries(scan: ScanResult, entity: string, patterns: RegExp[]) {
+  const candidates=scan.rows.filter((row)=>patterns.some((pattern)=>pattern.test(row.label)));
+  return candidates.find((row)=>row.entity===entity)||candidates.find((row)=>row.entity==="Consolidated")||candidates.find((row)=>row.entity==="Group")||candidates[0];
 }
 function modelSnapshot(scan: ScanResult | null, entity: string, index: number): ModelSnapshot {
   const cash = scanMetric(scan,entity,index,/consolidated ending cash|ending cash|closing cash/i);
@@ -204,8 +220,8 @@ export default function Home() {
   function addCashLever(){setCashLevers((levers)=>[...levers,{id:`lever_${Date.now()}`,label:"Custom cash lever",hint:"Map this to any model assumption cell",value:0,base:0,min:-10,max:10,step:.1,unit:"cash",range:"",impact:1}])}
   function updateCashLever(id:string,patch:Partial<CashLever>){setCashLevers((levers)=>levers.map((lever)=>lever.id===id?{...lever,...patch}:lever))}
   function removeCashLever(id:string){setCashLevers((levers)=>levers.filter((lever)=>lever.id!==id))}
-  function setCashRole(id:string,role:CashRole){setConfig((c)=>({...c,cashRoles:{...c.cashRoles,[id]:role}}))}
-  function resetCashDefaults(){if(!scan)return;setConfig((c)=>({...c,cashRoles:defaultCashRoles(scan.rows,scan.sourceAssignments.assumptions)}))}
+  function setCashRole(id:string,role:CashRole){setConfig((c)=>({...c,cashOpeningId:selectedOpeningId,cashClosingId:selectedClosingId,cashRoles:{...effectiveCashRoles,[id]:role}}))}
+  function resetCashDefaults(){if(!scan)return;setConfig((c)=>({...c,cashOpeningId:selectedOpeningId,cashClosingId:selectedClosingId,cashRoles:defaultCashRoles(cashScopeRows,scan.sourceAssignments.assumptions)}))}
   function addCustomCashLine(){setConfig((c)=>({...c,customCashLines:[...c.customCashLines,{id:`cash_${Date.now()}`,name:"",role:"in" as CashRole,monthly:0}]}))}
   function updateCustomCashLine(id:string,patch:Partial<CustomCashLine>){setConfig((c)=>({...c,customCashLines:c.customCashLines.map((line)=>line.id===id?{...line,...patch}:line)}))}
   function removeCustomCashLine(id:string){setConfig((c)=>({...c,customCashLines:c.customCashLines.filter((line)=>line.id!==id)}))}
@@ -232,22 +248,32 @@ export default function Home() {
   const useCashTab=cashCandidateRows(cashSheetRows,cashAssumptionsSheet).length>=3;
   const cashScopeRows:ScanRow[]=scan?(useCashTab?cashSheetRows:scan.rows):[];
   const cashRows:ScanRow[]=cashCandidateRows(cashScopeRows,cashAssumptionsSheet);
-  const cashBalanceRows:ScanRow[]=cashScopeRows.filter((row)=>/[a-z]/i.test(row.label)&&row.values.some((v)=>Math.abs(v)>0.01)&&row.sheet!==cashAssumptionsSheet);
+  const cashBalanceRows:ScanRow[]=cashBalanceCandidateRows(cashScopeRows,cashAssumptionsSheet);
+  const selectedOpeningId=cashBalanceRows.some((row)=>row.id===config.cashOpeningId)?config.cashOpeningId:selectCashBalanceRow(cashBalanceRows,"opening")?.id||"";
+  const selectedClosingId=cashBalanceRows.some((row)=>row.id===config.cashClosingId&&!/revolver|facility|term loan|debt/i.test(row.label))?config.cashClosingId:selectCashBalanceRow(cashBalanceRows,"closing")?.id||"";
+  const suggestedCashRoles=defaultCashRoles(cashScopeRows,cashAssumptionsSheet);
+  const retainedCashRoles=selectedOpeningId===config.cashOpeningId&&selectedClosingId===config.cashClosingId?Object.fromEntries(Object.entries(config.cashRoles).filter(([id])=>cashRows.some((row)=>row.id===id))):{};
+  const effectiveCashRoles={...suggestedCashRoles,...retainedCashRoles};
   // The waterfall needs the designated opening/closing balance rows for its endpoints,
   // even though those balances are (correctly) excluded from the movement candidates.
-  const cashBridgeRows:ScanRow[]=(()=>{const set=[...cashRows];[config.cashOpeningId,config.cashClosingId].forEach((id)=>{if(!id)return;const row=cashBalanceRows.find((r)=>r.id===id);if(row&&!set.some((r)=>r.id===row.id))set.push(row)});return set})();
-  const bridgeOpts={roles:config.cashRoles,openingId:config.cashOpeningId,closingId:config.cashClosingId,customLines:config.customCashLines};
-  const cashSource=scan?.sourceAssignments?.cashFlow,consolidatedRows=scan?.rows.filter((r)=>r.sheet===cashSource)||[],groupCashRow=consolidatedRows.find((r)=>/consolidated ending cash|ending cash|closing cash/i.test(r.label)),groupMoveRow=consolidatedRows.find((r)=>/net change|net cash movement|change in cash/i.test(r.label)),groupCash=groupCashRow?.values[last],groupMove=groupMoveRow?.values[last],groupUnit=groupCashRow?.unit||"model units";
-  const liquidityRows=scan?.rows.filter((r)=>(r.sheet==="Liquidity"||/liquidity/i.test(r.section))&&/headroom/i.test(r.label))||[],breaches=liquidityRows.filter((r)=>(r.values[last]??0)<0).length;
+  const cashBridgeRows:ScanRow[]=(()=>{const set=[...cashRows];[selectedOpeningId,selectedClosingId].forEach((id)=>{if(!id)return;const row=cashBalanceRows.find((r)=>r.id===id);if(row&&!set.some((r)=>r.id===row.id))set.push(row)});return set})();
+  const bridgeOpts={roles:effectiveCashRoles,openingId:selectedOpeningId,closingId:selectedClosingId,customLines:config.customCashLines};
+  const cashSource=scan?.sourceAssignments?.cashFlow,consolidatedRows=scan?.rows.filter((r)=>r.sheet===cashSource)||[],groupCashRow=selectCashBalanceRow(consolidatedRows,"closing"),groupMoveRow=consolidatedRows.find((r)=>/net change|net cash movement|change in cash|net cash flow before (?:financing|revolver)/i.test(r.label)),groupCash=groupCashRow?.values[last],groupMove=groupMoveRow?.values[last],groupUnit=groupCashRow?.unit||"model units";
   const schedule=[["Revenue",calc.revenue],["COGS",calc.cogs],["EBITDA",calc.ebitda],["Receivables",calc.receivables],["Inventory",calc.inventory],["Payables",calc.payables],["Change in working capital",calc.deltaNwc],["Operating cash flow",calc.ocf],["Capex",calc.capex],["Debt service",calc.debt],["Financing",calc.financing],["Net cash movement",calc.net],["Closing cash",calc.cash]] as [string,number[]][];
 
   function assistantOutputsFor(nextDrivers:Record<DriverKey,number>,nextLevers:CashLever[]):AssistantOutputs {
     const customImpact=nextLevers.reduce((total,lever)=>total+(lever.value-lever.base)*lever.impact,0);
     const ccc=nextDrivers.dso+nextDrivers.dio-nextDrivers.dpo;
     if(scan){
-      const base=modelSnapshot(scan,selectedEntity,last),revenue=scanMetric(scan,selectedEntity,last,/^revenue$|net revenue|sales revenue/i)||0,costs=scanMetric(scan,selectedEntity,last,/cogs|cost of goods|direct costs/i)||0;
+      const base=modelSnapshot(scan,selectedEntity,last),targetUnit=groupCashRow?.unit||"model units";
+      const revenue=convertedSeries(preferredSeries(scan,selectedEntity,[/^total billings$/i,/gross sales invoiced/i,/^revenue$|net revenue|sales revenue/i]),targetUnit,scan.periods.length)[last]||0;
+      const costs=convertedSeries(preferredSeries(scan,selectedEntity,[/^total purchases$/i,/gross procurement invoiced/i,/^cogs$|cost of goods|direct costs/i]),targetUnit,scan.periods.length)[last]||0;
       const workingCapitalImpact=-(nextDrivers.dso-baselineDrivers.dso)*revenue/30.4+(nextDrivers.dpo-baselineDrivers.dpo)*costs/30.4-(nextDrivers.dio-baselineDrivers.dio)*costs/30.4;
-      const totalImpact=workingCapitalImpact+customImpact,closingCash=base.cash===null?null:base.cash+totalImpact;
+      const totalImpact=workingCapitalImpact+customImpact,unconstrainedCash=base.cash===null?null:base.cash+totalImpact;
+      const hasLiquidityPlug=scan.rows.some((row)=>/revolver.*drawdown.*plug|automatic.*revolver|financing plug/i.test(`${row.label} ${row.section}`));
+      const minimumCash=convertedSeries(preferredSeries(scan,selectedEntity,[/^minimum cash(?: buffer)?$/i,/minimum liquidity/i]),targetUnit,scan.periods.length)[last]||0;
+      const revolverBalance=convertedSeries(preferredSeries(scan,selectedEntity,[/revolver.*closing balance|closing.*revolver|revolving facility.*closing/i]),targetUnit,scan.periods.length)[last]||0;
+      const closingCash=unconstrainedCash===null?null:hasLiquidityPlug?(totalImpact<0?Math.max(minimumCash,unconstrainedCash):base.cash!+Math.max(0,totalImpact-revolverBalance)):unconstrainedCash;
       const burn=base.cash!==null&&base.runway!==null&&base.runway>0&&base.runway<99?base.cash/base.runway:0;
       const runway=closingCash!==null?(burn>0?Math.max(0,closingCash/burn):base.runway):null;
       const baseOcf=scanMetric(scan,selectedEntity,last,/operating cash flow|net cash from operating|cash from operations/i);
@@ -302,8 +328,19 @@ export default function Home() {
     const dr = { dso: vals.dso ?? baselineDrivers.dso, dpo: vals.dpo ?? baselineDrivers.dpo, dio: vals.dio ?? baselineDrivers.dio };
     const nextLevers = cashLevers.map((lever) => ({ ...lever, value: vals[lever.id] ?? lever.base }));
     const out = assistantOutputsFor(dr, nextLevers);
-    let series = calculate(data, dr, openingCash).cash.slice(start, last + 1);
-    if (out.closing_cash != null && series.length) { const shift = out.closing_cash - series[series.length - 1]; series = series.map((c) => c + shift); }
+    let series:number[];
+    if(scan){
+      const length=scan.periods.length,targetUnit=groupCashRow?.unit||"model units";
+      const baseCash=convertedSeries(groupCashRow,targetUnit,length);
+      const billings=convertedSeries(preferredSeries(scan,selectedEntity,[/^total billings$/i,/gross sales invoiced/i,/^revenue$|net revenue|sales revenue/i]),targetUnit,length);
+      const purchases=convertedSeries(preferredSeries(scan,selectedEntity,[/^total purchases$/i,/gross procurement invoiced/i,/^cogs$|cost of goods|direct costs/i]),targetUnit,length);
+      const minimumCash=convertedSeries(preferredSeries(scan,selectedEntity,[/^minimum cash(?: buffer)?$/i,/minimum liquidity/i]),targetUnit,length);
+      const revolverBalance=convertedSeries(preferredSeries(scan,selectedEntity,[/revolver.*closing balance|closing.*revolver|revolving facility.*closing/i]),targetUnit,length);
+      const hasLiquidityPlug=scan.rows.some((row)=>/revolver.*drawdown.*plug|automatic.*revolver|financing plug/i.test(`${row.label} ${row.section}`));
+      const customImpact=nextLevers.reduce((total,lever)=>total+(lever.value-lever.base)*lever.impact,0);
+      const dsoDelta=dr.dso-baselineDrivers.dso,dpoDelta=dr.dpo-baselineDrivers.dpo,dioDelta=dr.dio-baselineDrivers.dio;
+      series=scenarioCashPath(baseCash,billings,purchases,{dso:dsoDelta,dpo:dpoDelta,dio:dioDelta,custom:customImpact},hasLiquidityPlug?{minimumCash,revolverBalance}:undefined).slice(start,last+1);
+    }else series=calculate(data,dr,openingCash).cash.slice(start,last+1);
     return { out, series };
   }
 
@@ -311,7 +348,7 @@ export default function Home() {
   <section className="workspace"><div className="page-head"><div><p className="eyebrow">Liquidity command centre</p><h1>See where cash is going, then change the outcome.</h1><p>Translate the connected forecast into working capital, cash flow and runway. Test changes before touching the underlying model.</p></div><div className="period-controls"><div><Label>From</Label><Select value={String(start)} onValueChange={(v)=>{const n=Number(v);setStart(n);if(n>end)setEnd(n)}}><SelectTrigger><SelectValue/></SelectTrigger><SelectContent>{labels.map((m,i)=><SelectItem key={m} value={String(i)}>{m}</SelectItem>)}</SelectContent></Select></div><div><Label>To</Label><Select value={String(last)} onValueChange={(v)=>{const n=Number(v);setEnd(n);if(n<start)setStart(n)}}><SelectTrigger><SelectValue/></SelectTrigger><SelectContent>{labels.map((m,i)=><SelectItem key={m} value={String(i)}>{m}</SelectItem>)}</SelectContent></Select></div></div></div>
   {message&&<div className="status-banner" role="status">{message}<button onClick={()=>setMessage("")}>×</button></div>}
   <Coverage scan={scan} onScan={scanModel} busy={scanBusy}/>
-  <div className="kpi-grid"><article><span>{scan?"Closing cash":"Closing cash"}</span><strong>{money(scan?(groupCash??0):(calc.cash[legacyLast]??0))}</strong><small>{scan?`${groupUnit} from connected model`:`${cashDelta>=0?"+":""}${money(cashDelta)} vs base`}</small></article><article><span>{scan?"Model horizon":"Runway"}</span><strong>{scan?`${scan.periods.length} months`:runwayNow>=99?"Cash generative":`${runwayNow.toFixed(1)} months`}</strong><small>At {labels[last]}</small></article><article><span>{scan?"Latest net cash movement":"Operating cash flow"}</span><strong>{money(scan?(groupMove??0):sum(calc.ocf,start,legacyLast))}</strong><small>{selectedName}</small></article><article><span>{scan?"Liquidity exceptions":"Cash conversion cycle"}</span><strong>{scan?`${breaches} entities`:`${(drivers.dso+drivers.dio-drivers.dpo).toFixed(0)} days`}</strong><small>{scan?"Below minimum balance at period end":`${drivers.dso} DSO + ${drivers.dio} DIO − ${drivers.dpo} DPO`}</small></article></div>
+  <div className="kpi-grid"><article><span>Closing cash</span><strong>{money(scan?(groupCash??0):(calc.cash[legacyLast]??0))}</strong><small>{scan?`${groupUnit} from connected model`:`${cashDelta>=0?"+":""}${money(cashDelta)} vs base`}</small></article><article><span>Runway</span><strong>{scan?(scanBase.runway===null?"Not available":scanBase.runway>=99?"Cash-generative":`${scanBase.runway.toFixed(1)} months`):runwayNow>=99?"Cash-generative":`${runwayNow.toFixed(1)} months`}</strong><small>Using recent negative cash movement at {labels[last]}</small></article><article><span>{scan?"Latest net cash movement":"Operating cash flow"}</span><strong>{money(scan?(groupMove??0):sum(calc.ocf,start,legacyLast))}</strong><small>{scan?labels[last]:selectedName}</small></article><article><span>Cash conversion cycle</span><strong>{(drivers.dso+drivers.dio-drivers.dpo).toFixed(0)} days</strong><small>{drivers.dso} DSO + {drivers.dio} DIO − {drivers.dpo} DPO</small></article></div>
   <Tabs defaultValue="overview" className="main-tabs"><TabsList><TabsTrigger value="overview"><WalletCards size={15}/> Summary</TabsTrigger><TabsTrigger value="collections" disabled={!!scan&&!scan.modules.includes("collections")}>Customer collections</TabsTrigger><TabsTrigger value="payments" disabled={!!scan&&!scan.modules.includes("payables")}>Supplier payments</TabsTrigger><TabsTrigger value="scenario"><SlidersHorizontal size={15}/> Scenario levers</TabsTrigger><TabsTrigger value="scenarios"><Columns3 size={15}/> Compare scenarios</TabsTrigger><TabsTrigger value="working" disabled={!!scan&&!scan.modules.some((m)=>["receivables","payables","workingCapital"].includes(m))}>Working capital</TabsTrigger><TabsTrigger value="debt" disabled={!!scan&&!scan.modules.includes("debt")}>Debt</TabsTrigger><TabsTrigger value="liquidity" disabled={!!scan&&!scan.modules.includes("liquidity")}>Liquidity</TabsTrigger><TabsTrigger value="covenants" disabled={!!scan&&!scan.modules.includes("covenants")}>Covenants</TabsTrigger><TabsTrigger value="schedule">Schedule</TabsTrigger><TabsTrigger value="mapping"><Settings2 size={15}/> Model mapping</TabsTrigger></TabsList>
   <TabsContent value="overview"><div className="summary-stack"><AskModelAssistant state={assistantState} onApply={applyAssistantChanges} onReset={resetAssistantScenario} canReset={!!assistantOriginal&&assistantOriginal.baseline===JSON.stringify({drivers:baselineDrivers,levers:cashLevers.map((lever)=>[lever.id,lever.base])})}/>{scan&&scan.modules.includes("cash")?<CashFlowModule scan={scan} entity={selectedEntity} setEntity={setSelectedEntity} start={start} end={last} cashRows={cashBridgeRows} bridgeOpts={bridgeOpts}/>:<div className="content-grid"><section className="panel chart-panel"><div className="panel-head"><div><p className="eyebrow">Cash bridge</p><h2>{selectedName}</h2></div><span className="legend"><i className="inflow"/> Inflow <i className="outflow"/> Outflow</span></div><Waterfall calc={calc} start={start} end={legacyLast}/></section><aside className="panel health-panel"><div className="panel-head"><div><p className="eyebrow">Liquidity health</p><h2>What is driving cash</h2></div></div><div className="health-row"><span>EBITDA contribution</span><strong className="good">+{money(sum(calc.ebitda,start,legacyLast))}</strong></div><div className="health-row"><span>Working-capital drag</span><strong className={-sum(calc.deltaNwc,start,legacyLast)>=0?"good":"bad"}>{money(-sum(calc.deltaNwc,start,legacyLast))}</strong></div><div className="health-row"><span>Capex and debt</span><strong className="bad">{money(-sum(calc.capex,start,legacyLast)-sum(calc.debt,start,legacyLast))}</strong></div></aside></div>}</div></TabsContent>
   <TabsContent value="collections">{scan?<CustomerCollectionsModule scan={scan} start={start} end={last} onWriteDriver={writeAccountDriver}/>:<section className="panel empty-module"><h2>Connect and scan a model</h2><p>Customer collections support invoice-level records and account-by-month debtor schedules.</p></section>}</TabsContent>

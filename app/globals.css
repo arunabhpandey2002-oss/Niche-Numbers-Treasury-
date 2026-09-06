@@ -96,6 +96,9 @@
 /* ---- Scenario lab (scenario-lab) ---- */
 .sc-root{display:flex;flex-direction:column}
 .sc-note{font-size:12.5px;color:#7b6a3a;background:#fbf5e9;border:1px solid #efe3c6;border-radius:9px;padding:9px 12px;margin:4px 0 12px}
+.sc-actions{display:flex;gap:8px;align-items:center}
+.sc-kpi-picker{margin-top:12px;padding:12px 14px;border:1px solid #e1e5ee;border-radius:10px;background:#f8f9fc}
+.sc-kpi-picker>strong{display:block;font-size:11px;margin-bottom:9px}.sc-kpi-picker>div{display:flex;flex-wrap:wrap;gap:8px 16px}.sc-kpi-picker label{display:flex;align-items:center;gap:7px;font-size:11px;color:#39435a;cursor:pointer}.sc-kpi-picker small{display:block;color:#8b93a6;font-size:9px;margin-top:9px}
 .sc-scroll{overflow-x:auto;margin-top:12px;border:1px solid #e7eaf0;border-radius:12px}
 .sc-table{border-collapse:collapse;width:100%;min-width:520px;font-size:13px}
 .sc-table th,.sc-table td{padding:9px 12px;border-bottom:1px solid #eef1f6;text-align:right;vertical-align:middle}
@@ -117,11 +120,13 @@
 .sc-chart{border:1px solid #e7eaf0;border-radius:12px;padding:12px 14px;background:#fff}
 .sc-chart svg{width:100%;height:auto;display:block}
 .sc-zero{stroke:#d7dbe6;stroke-dasharray:3 3}
+.sc-grid{stroke:#edf0f5;stroke-width:1}
 .sc-axis{fill:#9aa1b4;font-size:11px}
 .sc-legend{display:flex;flex-wrap:wrap;gap:14px;margin-top:8px;font-size:12px;color:#59617a}
 .sc-legend span{display:inline-flex;align-items:center;gap:6px} .sc-legend i{width:11px;height:3px;border-radius:2px;display:inline-block}
 .sc-legend b{color:#172033;font-variant-numeric:tabular-nums}
 .sc-chart-empty{color:#9aa1b4;font-size:13px;padding:24px;text-align:center}
+.sc-chart-note{font-size:10px;line-height:1.45;color:#7e879b;margin:10px 0 0;padding-top:9px;border-top:1px solid #eef1f5}
 
 /* Cash-flow curation editor */
 .cfe-panel{padding:18px;margin-top:14px}
