@@ -5,7 +5,7 @@ export type ModuleId = "cash" | "collections" | "receivables" | "payables" | "wo
 
 // Bump this whenever the persisted scan shape or extraction logic changes.
 // The UI uses it to rebuild an older workbook scan exactly once.
-export const SCAN_SCHEMA_VERSION = 3;
+export const SCAN_SCHEMA_VERSION = 4;
 
 export type ScanRow = {
   id: string;
@@ -89,9 +89,63 @@ export type CashBridgeStep = {
 
 const openingCashPattern = /beginning cash|opening cash|opening balance|opening.*cash|cash.*opening|cash at (?:the )?start|cash brought forward/i;
 const closingCashPattern = /ending cash|closing cash|closing balance|closing.*cash|cash.*closing|cash at (?:the )?end|cash carried forward/i;
+const financingBalancePattern = /revolver|revolving|facility|term loan|debt|borrow|lease|bond|note|debenture|overdraft/i;
+
+function cashBalanceScore(row: ScanRow, kind: "opening" | "closing") {
+  const label = row.label.trim();
+  const exactCash = kind === "opening" ? /^(?:beginning|opening) cash(?: balance)?$/i : /^(?:ending|closing) cash(?: balance)?$|^cash after (?:financing|revolver|debt)$/i;
+  const cashWords = /cash|bank|liquidity/i.test(label);
+  const kindWords = kind === "opening" ? openingCashPattern.test(label) : closingCashPattern.test(label);
+  if (!kindWords && !exactCash.test(label)) return -Infinity;
+  let score = exactCash.test(label) ? 100 : cashWords ? 70 : 25;
+  if (financingBalancePattern.test(label) && !cashWords) score -= 80;
+  if (/minimum|buffer|headroom|available|restricted/i.test(label)) score -= 60;
+  return score;
+}
+
+/** Pick a cash balance, never a debt/revolver balance that merely contains
+ * "opening balance" or "closing balance". This keeps the logic workbook-agnostic. */
+export function selectCashBalanceRow(rows: ScanRow[], kind: "opening" | "closing") {
+  return rows
+    .map((row, index) => ({ row, index, score: cashBalanceScore(row, kind) }))
+    .filter((candidate) => candidate.score > 0)
+    .sort((a, b) => b.score - a.score || a.index - b.index)[0]?.row;
+}
+
+/** Balance rows shown in the cash-flow builder. Cash checkpoints such as
+ * "Cash before revolver" remain selectable, while loan balances are excluded. */
+export function cashBalanceCandidateRows(rows: ScanRow[], assumptionsSheet?: string) {
+  return rows.filter((row) => {
+    if (assumptionsSheet && row.sheet === assumptionsSheet) return false;
+    if (!row.values.some((value) => Math.abs(value) > .01)) return false;
+    if (!/[a-z]/i.test(row.label)) return false;
+    if (financingBalancePattern.test(row.label) && !/cash/i.test(row.label)) return false;
+    return /cash|bank balance|liquidity balance/i.test(row.label) && (STOCK_ROW.test(row.label) || /cash before|cash after/i.test(row.label));
+  });
+}
 
 export function roundDays(value: number) {
   return Number.isFinite(value) ? Math.round(value) : 0;
+}
+
+export function scenarioCashPath(
+  baseCash: number[],
+  billings: number[],
+  purchases: number[],
+  changes: { dso: number; dpo: number; dio: number; custom?: number },
+  liquidityPlug?: { minimumCash: number[]; revolverBalance: number[] },
+) {
+  const unconstrained=baseCash.map((cash,index)=>cash
+    -(changes.dso*(billings[index]||0)/30.4)
+    +(changes.dpo*(purchases[index]||0)/30.4)
+    -(changes.dio*(purchases[index]||0)/30.4)
+    +(changes.custom||0));
+  if (!liquidityPlug) return unconstrained;
+  return unconstrained.map((cash,index)=>{
+    const base=baseCash[index]||0,impact=cash-base,minimum=liquidityPlug.minimumCash[index]??-Infinity,revolver=Math.max(0,liquidityPlug.revolverBalance[index]||0);
+    if (impact < 0) return Math.max(minimum,cash);
+    return base + Math.max(0,impact-revolver);
+  });
 }
 
 function periodTotal(row: ScanRow, start: number, end: number) {
@@ -112,7 +166,7 @@ function cashDirection(label: string, value: number, section = "") {
 }
 
 function cashBridgeCategory(label: string) {
-  if (/principal repayment|loan repayment|debt repayment|amorti[sz]ation|repayment of borrow|lease principal/i.test(label)) return "Debt repayments";
+  if (/principal repayment|loan repayment|debt repayment|revolver.*repayment|revolving.*repayment|facility.*repayment|amorti[sz]ation|repayment of borrow|lease principal/i.test(label)) return "Debt repayments";
   if (/drawdown|debt proceeds|new borrowing|loan proceeds|revolver draw|facility draw/i.test(label)) return "Debt drawdowns";
   if (/interest(?!\s+(?:income|received|earned))|commitment fee|lease interest/i.test(label)) return "Interest & fees";
   if (/equity|capital raise|cash injection|intercompany funding|share issue/i.test(label)) return "Equity & funding";
@@ -139,6 +193,7 @@ const NON_CASH_LINE = /%|per unit|per seat|per month|per account|number of|no\. 
 // invent billions of phantom cash movement, so these are never movement lines —
 // they only ever serve as the opening/closing endpoints of the bridge.
 const STOCK_ROW = /\bbalance\b|outstanding|\bdrawn\b|\bundrawn\b|headroom|available|utili[sz]ed|\bstock\b(?!\s*days)|closing|opening|carried forward|brought forward|\bposition\b/i;
+const CASH_CHECKPOINT = /cash before|cash after|pre-financing cash|post-financing cash/i;
 
 function inflowKeyword(label: string) {
   return /collection|receipt|received|drawdown|borrowing|proceeds|funding|equity|capital raise|cash injection|interest income|management fee income|inflow|revenue|billing|sales(?! incentive)|income(?! tax)/i.test(label);
@@ -151,11 +206,14 @@ function outflowKeyword(label: string) {
 // assumptions/driver sheet, ratio/count rows, subtotals and the opening/closing balances.
 export function isCashCandidate(row: ScanRow, assumptionsSheet?: string): boolean {
   if (assumptionsSheet && row.sheet === assumptionsSheet) return false;
-  if (!row.values.some((v) => Math.abs(v) > 0.01)) return false;
+  // A small monthly line can still be material over a year (for example,
+  // revolver interest). Use a near-zero test here; the period total is filtered later.
+  if (!row.values.some((v) => Math.abs(v) > 0.0001)) return false;
   if (!/[a-z]/i.test(row.label)) return false;   // numeric-only labels are parse artefacts, not real lines
   if (/^[₹$€£]?\s*(?:in\s+)?(?:crore|cr|lakhs?|million|mn|thousands?|000s|units|inr|usd|eur|gbp)$/i.test(row.label.trim())) return false; // bare unit/currency header rows
   if (NON_CASH_LINE.test(row.label)) return false;
   if (STOCK_ROW.test(row.label)) return false;   // balances are endpoints, never monthly movements
+  if (CASH_CHECKPOINT.test(row.label)) return false;
   if (openingCashPattern.test(row.label) || closingCashPattern.test(row.label)) return false;
   if (EXCLUDED_BRIDGE.test(row.label)) return false;
   return true;
@@ -193,8 +251,8 @@ export function buildCashBridge(
   const roles = opts?.roles;
   // In curated mode the user picks opening/closing explicitly; only fall back to
   // pattern matching when they haven't (or in fully-automatic mode).
-  const openingRow = (opts?.openingId ? rows.find((row) => row.id === opts.openingId) : undefined) || (opts?.openingId === undefined ? rows.find((row) => openingCashPattern.test(row.label)) : undefined);
-  const closingRow = (opts?.closingId ? rows.find((row) => row.id === opts.closingId) : undefined) || (opts?.closingId === undefined ? rows.find((row) => closingCashPattern.test(row.label)) : undefined);
+  const openingRow = (opts?.openingId ? rows.find((row) => row.id === opts.openingId) : undefined) || (opts?.openingId === undefined ? selectCashBalanceRow(rows, "opening") : undefined);
+  const closingRow = (opts?.closingId ? rows.find((row) => row.id === opts.closingId) : undefined) || (opts?.closingId === undefined ? selectCashBalanceRow(rows, "closing") : undefined);
   const opening = openingRow?.values[start] ?? 0;
   const buckets = new Map<string, { value: number; rows: string[] }>();
 
@@ -242,8 +300,8 @@ export function buildCashBridge(
   return [
     { name: "Opening cash", value: opening, total: true, rows: openingRow ? [openingRow.label] : [] },
     ...allMovements,
-    ...(Math.abs(reconciliation) > .01 ? [{ name: "Unmapped / reconciliation", value: reconciliation, rows: [] }] : []),
-    { name: "Closing cash", value: closing, total: true, rows: closingRow ? [closingRow.label] : [] },
+    ...(Math.abs(reconciliation) > .01 ? [{ name: "Reconciliation gap", value: reconciliation, rows: [] }] : []),
+    { name: closingRow?.label || "Closing cash", value: closing, total: true, rows: closingRow ? [closingRow.label] : [] },
   ];
 }
 
