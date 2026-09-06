@@ -98,11 +98,16 @@ function periodTotal(row: ScanRow, start: number, end: number) {
   return row.values.slice(start, end + 1).reduce((sum, value) => sum + (value || 0), 0);
 }
 
-function cashDirection(label: string, value: number) {
-  const outflow = /payment|paid|repayment|amorti[sz]ation|capex|capital expenditure|purchase|acquisition|payroll|salary|wages|bonus|tax|insurance|rent|interest expense|interest paid|supplier|vendor|creditor|cash operating|opex|operating expense|commitment fee|lease/i;
-  const inflow = /collection|receipt|received|drawdown|borrowing|proceeds|funding|equity|capital raise|cash injection|interest income|management fee income/i;
-  if (outflow.test(label) && !/drawdown|proceeds|received|receipt|collection|funding|equity|raise|injection/i.test(label)) return -Math.abs(value);
+function cashDirection(label: string, value: number, section = "") {
+  const inflow = /collection|receipt|received|drawdown|borrowing|proceeds|funding|equity|capital raise|cash injection|interest income|management fee income|inflow|revenue|billing/i;
+  const outflow = /payment|paid|repayment|amorti[sz]ation|capex|capital expenditure|purchase|acquisition|payroll|salar|wages|bonus|\btax\b|insurance|rent|interest expense|interest paid|supplier|vendor|creditor|cash operating|opex|operating expense|commitment fee|lease|\bcost\b|expense|outflow|marketing|cloud|infra|g&a|overhead/i;
+  const notOutflow = /drawdown|proceeds|received|receipt|collection|funding|equity|raise|injection|inflow|revenue|billing/i;
+  // A row's own words win; the section it sits under (e.g. "CASH OUTFLOWS") is the tie-breaker.
   if (inflow.test(label)) return Math.abs(value);
+  if (outflow.test(label) && !notOutflow.test(label)) return -Math.abs(value);
+  const sect = section.toLowerCase();
+  if (/inflow|collection|receipt|revenue|income/.test(sect)) return Math.abs(value);
+  if (/outflow|cost|expense|payment|spend/.test(sect)) return -Math.abs(value);
   return value;
 }
 
@@ -113,12 +118,12 @@ function cashBridgeCategory(label: string) {
   if (/equity|capital raise|cash injection|intercompany funding|share issue/i.test(label)) return "Equity & funding";
   if (/customer|collection|receipt|billings|sales proceeds|management fee income/i.test(label)) return "Customer collections";
   if (/supplier|vendor|creditor|trade payable|payments made|discount captured/i.test(label)) return "Supplier payments";
-  if (/payroll|salary|wages|bonus|employee|people cost/i.test(label)) return "People costs";
+  if (/payroll|salar|wages|bonus|employee|staff|headcount|people cost/i.test(label)) return "People costs";
   if (/income tax|corporate tax|tax paid/i.test(label)) return "Taxes";
-  if (/capex|capital expenditure|fixed asset|equipment purchase/i.test(label)) return "Capital expenditure";
+  if (/capex|capital expenditure|fixed asset|equipment purchase/i.test(label) && !/operating cash flow|pre[\s-]?capex|ex[\s-]?capex/i.test(label)) return "Capital expenditure";
   if (/acquisition|investment purchase/i.test(label)) return "Acquisitions & investments";
   if (/interest received|interest income|other income|grant received/i.test(label)) return "Other inflows";
-  if (/rent|insurance|cash operating|operating expense|opex|professional fee|marketing|software|utilities|management fee to/i.test(label)) return "Other operating costs";
+  if (/rent|insurance|cash operating|operating expense|opex|professional fee|marketing|software|subscription|utilities|cloud|infra|hosting|g&a|general|admin|overhead|management fee to/i.test(label)) return "Other operating costs";
   if (/fx|foreign exchange|currency translation/i.test(label)) return "FX movement";
   return "Other cash movement";
 }
@@ -128,7 +133,8 @@ export function buildCashBridge(rows: ScanRow[], start: number, end: number): Ca
   const closingRow = rows.find((row) => closingCashPattern.test(row.label));
   const opening = openingRow?.values[start] ?? 0;
   const closing = closingRow?.values[end] ?? 0;
-  const excluded = /net change|net cash|change in cash|memo|non-cash|subtotal|^total\b|total cash|cash conversion|closing debt|opening debt|rate|percentage|days/i;
+  // Skip every derived / subtotal / memo row — only primitive cash movements belong in a direct-method bridge.
+  const excluded = /net change|net cash|change in cash|operating cash flow|cash from operations|free cash flow|\bfcf\b|cumulative|running total|net burn|for avg|minimum cash|cash buffer|\bbuffer\b|headroom|coverage|\bdscr\b|\bratio\b|gross margin|operating margin|\bebitda\b|gross profit|operating profit|net profit|memo|non-cash|reconcil|\bcheck\b|\bkpi\b|subtotal|sub-total|^total\b|total cash|cash conversion|closing debt|opening debt|rate|percentage|\bdays\b/i;
   const buckets = new Map<string, { value: number; rows: string[] }>();
 
   rows.forEach((row) => {
@@ -137,7 +143,7 @@ export function buildCashBridge(rows: ScanRow[], start: number, end: number): Ca
     if (Math.abs(raw) <= .01) return;
     const name = cashBridgeCategory(row.label);
     const bucket = buckets.get(name) || { value: 0, rows: [] };
-    bucket.value += cashDirection(row.label, raw);
+    bucket.value += cashDirection(row.label, raw, row.section);
     bucket.rows.push(row.label);
     buckets.set(name, bucket);
   });
