@@ -114,12 +114,12 @@ function cashDirection(label: string, value: number, section = "") {
 function cashBridgeCategory(label: string) {
   if (/principal repayment|loan repayment|debt repayment|amorti[sz]ation|repayment of borrow|lease principal/i.test(label)) return "Debt repayments";
   if (/drawdown|debt proceeds|new borrowing|loan proceeds|revolver draw|facility draw/i.test(label)) return "Debt drawdowns";
-  if (/interest paid|cash interest|interest expense|commitment fee|lease interest/i.test(label)) return "Interest & fees";
+  if (/interest(?!\s+(?:income|received|earned))|commitment fee|lease interest/i.test(label)) return "Interest & fees";
   if (/equity|capital raise|cash injection|intercompany funding|share issue/i.test(label)) return "Equity & funding";
   if (/customer|collection|receipt|billings|sales proceeds|management fee income|revenue|\bsales\b|turnover|less:\s*returns|less:\s*discount|sales return|customer discount/i.test(label)) return "Customer collections";
   if (/payroll|salar|wages|bonus|employee|staff|headcount|people cost|leadership|team/i.test(label)) return "People costs";
   if (/supplier|vendor|creditor|trade payable|payments made|discount captured|cost of goods|\bcogs\b|\bcosts?\b|purchases?|inventory|materials|shipping|freight|logistics|reverse logistics/i.test(label)) return "Supplier payments";
-  if (/income tax|corporate tax|tax paid|\btax\b/i.test(label)) return "Taxes";
+  if (/income tax|corporate tax|tax paid|\btax(?:es|ation)?\b/i.test(label)) return "Taxes";
   if (/capex|capital expenditure|fixed asset|equipment purchase/i.test(label) && !/operating cash flow|pre[\s-]?capex|ex[\s-]?capex/i.test(label)) return "Capital expenditure";
   if (/acquisition|investment purchase/i.test(label)) return "Acquisitions & investments";
   if (/interest received|interest income|other income|grant received/i.test(label)) return "Other inflows";
@@ -139,7 +139,7 @@ function inflowKeyword(label: string) {
   return /collection|receipt|received|drawdown|borrowing|proceeds|funding|equity|capital raise|cash injection|interest income|management fee income|inflow|revenue|billing|sales(?! incentive)|income(?! tax)/i.test(label);
 }
 function outflowKeyword(label: string) {
-  return /payment|paid|repayment|amorti[sz]ation|capex|capital expenditure|purchase|acquisition|payroll|salar|wages|bonus|\btax\b|insurance|rent|interest expense|interest paid|supplier|vendor|creditor|opex|operating expense|commitment fee|lease|\bcost\b|\bcogs\b|expense|outflow|marketing|branding|cloud|infra|software|saas|legal|compliance|admin|overhead|shipping|logistics|freight|discount|returns|contingency|travel|conveyance|banking|fees|utilities|phone|internet|employee/i.test(label);
+  return /payment|paid|repayment|amorti[sz]ation|capex|capital expenditure|purchase|acquisition|payroll|salar|wages|bonus|\btax(?:es|ation)?\b|insurance|rent|interest(?!\s+(?:income|received|earned))|term loan|supplier|vendor|creditor|opex|operating expense|commitment fee|lease|\bcost\b|\bcogs\b|expense|outflow|marketing|branding|cloud|infra|software|saas|legal|compliance|admin|overhead|shipping|logistics|freight|discount|returns|contingency|travel|conveyance|banking|fees|utilities|phone|internet|employee/i.test(label);
 }
 
 // True when a row is a plausible cash-flow line the user might tag. Excludes the
@@ -148,6 +148,7 @@ export function isCashCandidate(row: ScanRow, assumptionsSheet?: string): boolea
   if (assumptionsSheet && row.sheet === assumptionsSheet) return false;
   if (!row.values.some((v) => Math.abs(v) > 0.01)) return false;
   if (!/[a-z]/i.test(row.label)) return false;   // numeric-only labels are parse artefacts, not real lines
+  if (/^[₹$€£]?\s*(?:in\s+)?(?:crore|cr|lakhs?|million|mn|thousands?|000s|units|inr|usd|eur|gbp)$/i.test(row.label.trim())) return false; // bare unit/currency header rows
   if (NON_CASH_LINE.test(row.label)) return false;
   if (openingCashPattern.test(row.label) || closingCashPattern.test(row.label)) return false;
   if (EXCLUDED_BRIDGE.test(row.label)) return false;
