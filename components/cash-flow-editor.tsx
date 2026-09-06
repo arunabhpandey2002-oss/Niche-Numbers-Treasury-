@@ -6,7 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { buildCashBridge, type CashRole, type CustomCashLine, type ScanRow } from "@/lib/treasury-model";
+import { buildCashBridge, defaultCashRoles, selectCashBalanceRow, type CashRole, type CustomCashLine, type ScanRow } from "@/lib/treasury-model";
 
 type Props = {
   rows: ScanRow[];          // candidate cash lines (assumptions/ratios already filtered out)
@@ -91,8 +91,11 @@ function MiniWaterfall({ steps, money }: { steps: { name: string; value: number;
 }
 
 export function CashFlowEditor(props: Props) {
-  const { rows, balanceRows, start, end, roles, openingId, closingId, customLines, money } = props;
+  const { rows, balanceRows, start, end, roles: suppliedRoles, openingId: suppliedOpeningId, closingId: suppliedClosingId, customLines, money } = props;
   const [query, setQuery] = useState("");
+  const openingId=balanceRows.some((row)=>row.id===suppliedOpeningId)?suppliedOpeningId:selectCashBalanceRow(balanceRows,"opening")?.id||"";
+  const closingId=balanceRows.some((row)=>row.id===suppliedClosingId&&!/revolver|facility|term loan|debt/i.test(row.label))?suppliedClosingId:selectCashBalanceRow(balanceRows,"closing")?.id||"";
+  const roles=useMemo(()=>openingId===suppliedOpeningId&&closingId===suppliedClosingId?{...defaultCashRoles(rows),...suppliedRoles}:defaultCashRoles(rows),[rows,suppliedRoles,openingId,closingId,suppliedOpeningId,suppliedClosingId]);
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -113,7 +116,7 @@ export function CashFlowEditor(props: Props) {
   );
 
   const tagged = rows.filter((row) => roles[row.id] === "in" || roles[row.id] === "out").length;
-  const reconStep = steps.find((s) => s.name.includes("reconcil"));
+  const reconStep = steps.find((s) => /reconcil/i.test(s.name));
   const closing = steps[steps.length - 1]?.value ?? 0;
 
   return (
@@ -144,7 +147,7 @@ export function CashFlowEditor(props: Props) {
               {balanceRows.map((row) => <SelectItem key={row.id} value={row.id}>{row.label} · {row.sheet}</SelectItem>)}
             </SelectContent>
           </Select>
-          <small className="cfe-hint">{closingId ? "We’ll flag any gap between this row and the movements as reconciliation." : "Closing cash is the sum of every line you tag — always complete."}</small>
+          <small className="cfe-hint">{closingId ? "Use Closing cash or a Cash after revolver/financing row. Debt balances are excluded. Any difference is shown only as a reconciliation check." : "Closing cash is the sum of every line you tag — always complete."}</small>
         </div>
       </div>
 
@@ -201,7 +204,7 @@ export function CashFlowEditor(props: Props) {
           <MiniWaterfall steps={steps} money={money} />
           <div className={`cfe-recon ${reconStep ? "warn" : "ok"}`}>
             {reconStep
-              ? <>Gap of <b>{money(reconStep.value)}</b> between your closing-cash row and the tagged lines — check for a missing line or a wrong tag.</>
+              ? <>Reconciliation difference of <b>{money(reconStep.value)}</b>. This is a check, not an expense: confirm the opening/closing cash rows and any ignored movements.</>
               : <>Balanced — every tagged line is counted once and the closing figure adds up exactly.</>}
           </div>
         </aside>
