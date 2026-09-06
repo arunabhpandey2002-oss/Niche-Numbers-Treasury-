@@ -47,11 +47,32 @@ export type AssistantReply = {
 };
 
 export type AssistantTopic = "dso" | "dpo" | "dio" | "cash" | "runway" | "ccc" | "debt" | "capex" | "people" | "revenue";
+export type Direction = "increase" | "decrease" | "target";
+export type MagnitudeUnit = "days" | "months" | "percent" | "currency" | "number";
+export type Magnitude = { mode: "to" | "by"; value: number; unit: MagnitudeUnit };
+export type RouteGap = "metric" | "topic" | "direction" | "magnitude";
+
+// Everything the deterministic router managed to pull out of the question,
+// before any AI is involved. The clarifying step reads `missing` to know
+// which of these slots still needs a question put to the user.
+export type RouteSlots = {
+  intent: "explain" | "scenario" | "out_of_scope";
+  topics: AssistantTopic[];
+  metric: keyof AssistantOutputs | null;
+  direction: Direction | null;
+  magnitude: Magnitude | null;
+  entity: string | null;
+};
+
 export type AssistantRoute = {
   intent: "explain" | "scenario";
   topics: AssistantTopic[];
   requested_outputs: Array<keyof AssistantOutputs>;
   broad_lever_search: boolean;
+  slots: RouteSlots;
+  missing: RouteGap[];
+  confidence: number;
+  matched: string[];
 };
 
 export type AssistantClarification = {
@@ -59,38 +80,153 @@ export type AssistantClarification = {
   options: Array<{ label: string; value: keyof AssistantOutputs }>;
 };
 
-const TOPIC_RULES: Array<[AssistantTopic, RegExp]> = [
-  ["dso", /\bdso\b|debtor|receiv|customer.{0,24}(pay|term)|collect|invoice/i],
-  ["dpo", /\bdpo\b|creditor|payable|supplier|vendor|payment terms?/i],
-  ["dio", /\bdio\b|inventory|stock days?|stock holding/i],
-  ["ccc", /cash conversion cycle|\bccc\b|working capital cycle/i],
-  ["runway", /runway|months? of cash|cash lasts?/i],
-  ["debt", /debt|loan|borrow|interest|principal|revolver/i],
-  ["capex", /capex|capital expenditure|equipment purchase/i],
-  ["people", /hiring|hire|headcount|payroll|salary|salaries|people cost/i],
-  ["revenue", /revenue|sales|subscription|price|volume|retention|churn/i],
-  ["cash", /cash flow|cash position|cash balance|closing cash|liquidity|cash/i],
+// ---------------------------------------------------------------------------
+// Deterministic router dictionary
+// ---------------------------------------------------------------------------
+// Plain-language phrases mapped to the model's topics. This is the part to grow
+// over time: when you notice a founder phrasing a question a new way, add the
+// phrase to the right list here — no other code needs to change. Matching is
+// stem-based, so "collect" already covers "collects/collected/collection".
+export const TOPIC_PHRASES: Record<AssistantTopic, string[]> = {
+  dso: ["dso", "days sales outstanding", "debtor days", "debtor", "receivable", "accounts receivable", "ar days", "collect", "collection", "get paid", "getting paid", "paid faster", "paid sooner", "customer pay", "customers pay", "customer to pay", "customers to pay", "pay us", "pay faster", "pay sooner", "pay quicker", "paying me", "paying us", "before paying", "time to pay", "days to pay", "taking to pay", "take to pay", "customer payment", "customer term", "credit period", "invoice", "invoicing", "money owed to us", "money customers owe"],
+  dpo: ["dpo", "days payable outstanding", "creditor days", "creditor", "payable", "accounts payable", "ap days", "supplier", "vendor", "pay supplier", "paying supplier", "supplier term", "supplier payment", "payment terms to supplier", "stretch payable", "delay paying", "money we owe", "bills we owe"],
+  dio: ["dio", "days inventory outstanding", "inventory", "stock", "stock days", "stock holding", "stock level", "warehouse", "goods on hand", "holding period"],
+  ccc: ["cash conversion cycle", "ccc", "working capital cycle", "cash cycle", "conversion cycle", "working capital days"],
+  runway: ["runway", "months of cash", "month of cash", "cash last", "cash will last", "run out of cash", "run out of money", "out of money", "out of cash", "survive", "stay alive", "last us"],
+  debt: ["debt", "loan", "borrow", "interest", "principal", "repayment", "repay", "revolver", "credit line", "line of credit", "facility", "drawdown", "draw down", "covenant", "leverage", "lender", "refinance"],
+  capex: ["capex", "capital expenditure", "capital expense", "equipment", "machinery", "buy equipment", "fixed asset", "asset purchase", "capital spend", "capital investment", "plant and machinery"],
+  people: ["hiring", "hire", "headcount", "head count", "payroll", "salary", "salaries", "wage", "team cost", "people cost", "staff cost", "compensation", "layoff", "lay off", "reduce staff", "cut staff", "freeze hiring", "hiring freeze"],
+  revenue: ["revenue", "sales", "topline", "top line", "subscription", "mrr", "arr", "pricing", "raise price", "volume", "unit sold", "retention", "churn", "grow sales", "new customer", "booking", "upsell"],
+  cash: ["cash flow", "cashflow", "cash position", "cash balance", "closing cash", "ending cash", "liquidity", "cash", "cash in bank", "bank balance", "free cash flow", "fcf", "cash burn", "burn rate", "burn", "spending"],
+};
+
+// Phrases that identify which OUTPUT the user wants to measure. Order matters:
+// the first list that hits sets the primary metric, so the most generic
+// ("cash flow" -> net movement) sits last.
+const METRIC_PHRASES: Array<[keyof AssistantOutputs, string[]]> = [
+  ["runway_months", ["runway", "months of cash", "cash last", "cash will last", "run out of cash", "run out of money", "how long"]],
+  ["closing_cash", ["closing cash", "ending cash", "cash position", "cash balance", "cash in bank", "bank balance", "how much cash"]],
+  ["operating_cash_flow", ["operating cash flow", "ocf", "cash from operations"]],
+  ["cash_conversion_cycle_days", ["cash conversion cycle", "ccc", "working capital cycle", "cash cycle"]],
+  ["monthly_burn_rate", ["burn rate", "monthly burn", "how much are we burning", "cash burn"]],
+  ["net_cash_movement", ["net cash", "cash movement", "change in cash", "cash flow"]],
 ];
 
+// Words that mean "run a what-if", rather than "explain the current model".
+const SCENARIO_WORDS = ["what if", "if i", "if we", "what happens", "what would happen", "suppose", "imagine", "scenario", "simulate", "play with", "change", "adjust", "move the", "increase", "decrease", "reduce", "raise", "lower", "extend", "improve", "cut", "grow", "shrink", "delay", "accelerate", "stretch", "offer a discount", "pull forward", "push back", "should i", "should we", "how do i", "how can i", "how do we", "how can we", "what should"];
+
+function padded(question: string) {
+  return " " + question.toLowerCase().replace(/[^a-z0-9%.]+/g, " ").replace(/\s+/g, " ").trim() + " ";
+}
+// Stem match: the phrase must start on a word boundary but need not end on one,
+// so "collect" matches "collection" and "invoice" matches "invoicing".
+function matchStem(hay: string, phrase: string) {
+  const p = phrase.toLowerCase().trim();
+  if (p.includes("...")) {
+    const [a, b] = p.split("...").map((part) => part.trim());
+    const ia = hay.indexOf(" " + a), ib = hay.indexOf(b + " ");
+    return ia >= 0 && ib >= 0 && ia < ib;
+  }
+  return hay.includes(" " + p);
+}
+
+function parseMagnitude(question: string): Magnitude | null {
+  const q = " " + question.toLowerCase() + " ";
+  const unitOf = (u: string | undefined): MagnitudeUnit => {
+    if (!u) return "number";
+    if (/^%|^percent/.test(u)) return "percent";
+    if (/^day/.test(u)) return "days";
+    if (/^month|^mo$/.test(u)) return "months";
+    if (/^(k|m|cr|crore|lakh|rs|inr)/.test(u)) return "currency";
+    return "number";
+  };
+  const unitGroup = "(days?|months?|mo|%|percent|k|m|cr|crore|lakh|rs|inr)?";
+  let m = q.match(new RegExp("\\b(?:to|at|of)\\s+(\\d+(?:\\.\\d+)?)\\s*" + unitGroup));
+  if (m) return { mode: "to", value: Number(m[1]), unit: unitOf(m[2]) };
+  m = q.match(new RegExp("\\bby\\s+(\\d+(?:\\.\\d+)?)\\s*" + unitGroup));
+  if (m) return { mode: "by", value: Number(m[1]), unit: unitOf(m[2]) };
+  m = q.match(/(\d+(?:\.\d+)?)\s*(%|percent)\b/);
+  if (m) return { mode: "by", value: Number(m[1]), unit: "percent" };
+  m = q.match(/(\d+(?:\.\d+)?)\s*(days?|months?)\b/);
+  if (m) return { mode: "to", value: Number(m[1]), unit: unitOf(m[2]) };
+  return null;
+}
+
 export function routeQuestion(question: string): AssistantRoute {
-  const topics = TOPIC_RULES.filter(([, pattern]) => pattern.test(question)).map(([topic]) => topic);
-  const scenario = /\bif\b|what happens|what should|scenario|increase|decrease|reduce|extend|improve|change|higher|lower|pull.{0,12}(forward|back)|delay|accelerate|offer.{0,16}discount/i.test(question);
+  const hay = padded(question);
+  const matched: string[] = [];
+
+  const topics: AssistantTopic[] = [];
+  (Object.keys(TOPIC_PHRASES) as AssistantTopic[]).forEach((topic) => {
+    const phrase = TOPIC_PHRASES[topic].find((candidate) => matchStem(hay, candidate));
+    if (phrase) { topics.push(topic); matched.push(`topic:${topic}=${phrase}`); }
+  });
+
   const requestedOutputs: Array<keyof AssistantOutputs> = [];
-  if (/runway|months? of cash|cash lasts?/i.test(question)) requestedOutputs.push("runway_months");
-  if (/closing cash|cash position|cash balance/i.test(question)) requestedOutputs.push("closing_cash");
-  if (/operating cash flow|\bocf\b/i.test(question)) requestedOutputs.push("operating_cash_flow");
-  else if (/cash flow|net cash|cash movement/i.test(question)) requestedOutputs.push("net_cash_movement");
-  if (/cash conversion cycle|\bccc\b/i.test(question)) requestedOutputs.push("cash_conversion_cycle_days");
+  let metric: keyof AssistantOutputs | null = null;
+  METRIC_PHRASES.forEach(([output, phrases]) => {
+    const phrase = phrases.find((candidate) => matchStem(hay, candidate));
+    if (!phrase) return;
+    if (!metric) metric = output;
+    if (!requestedOutputs.includes(output)) requestedOutputs.push(output);
+    matched.push(`metric:${output}=${phrase}`);
+  });
+
+  const scenarioWord = SCENARIO_WORDS.find((word) => matchStem(hay, word));
+  const scenario = Boolean(scenarioWord);
+  if (scenarioWord) matched.push(`scenario:${scenarioWord}`);
+
+  const dayTopic = topics.some((topic) => topic === "dso" || topic === "dpo" || topic === "dio");
+  let direction: Direction | null = null;
+  if (/\b(target|get (us )?to|reach|hit|aim for|achieve|so (that )?we have|in order to)\b/i.test(question)) direction = "target";
+  else if (dayTopic && /\b(faster|sooner|quicker|speed up|accelerate|bring forward|pull forward|earlier)\b/i.test(question)) direction = "decrease";
+  else if (dayTopic && /\b(slower|later|delay|defer|push back|stretch|postpone|hold off)\b/i.test(question)) direction = "increase";
+  else if (/\b(increase|raise|grow|higher|more|boost|expand|ramp|scale up|bump|extend|lengthen)\b/i.test(question)) direction = "increase";
+  else if (/\b(decrease|reduce|lower|cut|less|shrink|drop|trim|slash|tighten|scale back|shorten|minimi[sz]e)\b/i.test(question)) direction = "decrease";
+  if (direction) matched.push(`direction:${direction}`);
+
+  const magnitude = parseMagnitude(question);
+  if (magnitude) matched.push(`magnitude:${magnitude.mode}:${magnitude.value}${magnitude.unit}`);
+
+  const broad = /\b(what should|which lever|which driver|what can i do|how (can|do) (i|we)|best way|ways? to|options? to)\b/i.test(question) || (scenario && !topics.length);
+
+  const outOfScope = !topics.length && !metric && !scenario && /\b(legal advice|tax advice|who are you|tell me a joke|the weather|your name)\b/i.test(question);
+  const slotsIntent: RouteSlots["intent"] = outOfScope ? "out_of_scope" : scenario ? "scenario" : "explain";
+
+  const slots: RouteSlots = { intent: slotsIntent, topics: [...new Set(topics)], metric, direction, magnitude, entity: null };
+
+  // Which slots still need a question before a scenario is well specified.
+  // Broad "what should I do" scenarios only need a metric to measure; specific
+  // ones ("reduce DSO") need a direction and a magnitude too.
+  const missing: RouteGap[] = [];
+  if (slotsIntent === "scenario") {
+    if (!metric) missing.push("metric");
+    if (!broad) {
+      if (!topics.length) missing.push("topic");
+      if (!direction && !magnitude) missing.push("direction");
+      if (!magnitude && direction !== "target") missing.push("magnitude");
+    }
+  }
+
+  let confidence = 0.25;
+  if (topics.length) confidence += 0.3;
+  if (metric) confidence += 0.2;
+  if (direction) confidence += 0.12;
+  if (magnitude) confidence += 0.13;
+  if (slotsIntent === "out_of_scope") confidence = 0.9;
+  confidence = Math.min(1, Number(confidence.toFixed(2)));
+
   return {
     intent: scenario ? "scenario" : "explain",
     topics: [...new Set(topics)],
     requested_outputs: [...new Set(requestedOutputs)],
-    broad_lever_search: /what should|which lever|which driver|how (can|do) i|extend runway|improve (cash|runway)/i.test(question),
+    broad_lever_search: broad,
+    slots, missing, confidence, matched,
   };
 }
 
 export function clarificationFor(route: AssistantRoute): AssistantClarification | null {
-  if (route.intent !== "scenario" || route.requested_outputs.length) return null;
+  if (route.slots.intent !== "scenario" || route.slots.metric) return null;
   return {
     question: "What result do you want to measure for this scenario?",
     options: [
@@ -145,7 +281,15 @@ export function compactModelState(state: AssistantEngineState, route: AssistantR
   const driverKeys = route.topics.includes("ccc") || route.broad_lever_search || !route.topics.length
     ? ["dso","dpo","dio"] : route.topics.filter((topic) => ["dso","dpo","dio"].includes(topic));
   return {
-    route,
+    route: {
+      intent: route.intent,
+      topics: route.topics,
+      requested_outputs: route.requested_outputs,
+      broad_lever_search: route.broad_lever_search,
+      direction: route.slots.direction,
+      magnitude: route.slots.magnitude,
+      metric: route.slots.metric,
+    },
     model: state.model,
     period: state.period,
     current_drivers: Object.fromEntries(driverKeys.map((key) => [key,state.inputs.built_in_drivers[key]])),
@@ -164,7 +308,7 @@ The route describes the user's intent, topics and requested outputs. The exact l
 
 For an understanding question, answer briefly from current_state. Whenever you need to show a number, use a placeholder whose name exactly matches a numeric field in current_state.computed_outputs or current_state.current_drivers, for example {{runway_months}}, {{closing_cash}}, {{dso}}, {{dpo}}, or {{dio}}. Do not type numeric results directly.
 
-For a scenario question, act only as a scenario translator: propose one concrete set of lever changes. Return exact new lever values, not deltas. Do not predict the resulting cash, runway, OCF, or CCC. The Niche Numbers scenario tool will apply the changes once and recompute once. Explain why the selected levers fit the request and give realistic business actions, but use no numeric digits in narrative fields.
+For a scenario question, act only as a scenario translator: propose one concrete set of lever changes. Return exact new lever values, not deltas. Do not predict the resulting cash, runway, OCF, or CCC. The Niche Numbers scenario tool will apply the changes once and recompute once. Explain why the selected levers fit the request and give realistic business actions, but use no numeric digits in narrative fields. When current_state.route.magnitude gives an explicit target or change and current_state.route.direction gives a direction, honour them exactly when choosing the new lever value.
 
 If the requested business factor does not have an available lever, do not substitute an unrelated lever. If the question is outside the model, such as legal or tax advice, say so briefly.
 
