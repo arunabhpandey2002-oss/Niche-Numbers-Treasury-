@@ -122,3 +122,53 @@
 .sc-legend span{display:inline-flex;align-items:center;gap:6px} .sc-legend i{width:11px;height:3px;border-radius:2px;display:inline-block}
 .sc-legend b{color:#172033;font-variant-numeric:tabular-nums}
 .sc-chart-empty{color:#9aa1b4;font-size:13px;padding:24px;text-align:center}
+
+/* Cash-flow curation editor */
+.cfe-panel{padding:18px;margin-top:14px}
+.cfe-root{display:block}
+.cfe-intro h3{font-size:15px;margin:4px 0 6px}
+.cfe-intro p:not(.eyebrow){color:var(--muted);font-size:11px;line-height:1.55;margin:0;max-width:820px}
+.cfe-balances{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin:16px 0;padding:14px;background:#f6f7fa;border-radius:9px}
+.cfe-balances label{display:block;font-size:10px;color:var(--muted);font-weight:700;margin-bottom:6px}
+.cfe-balances label small{font-weight:400;text-transform:none;letter-spacing:0}
+.cfe-hint{display:block;color:var(--muted);font-size:10px;margin-top:6px;line-height:1.4}
+.cfe-body{display:grid;grid-template-columns:minmax(0,1fr) minmax(320px,.62fr);gap:16px;align-items:start}
+.cfe-lines-head{display:flex;align-items:center;gap:10px;margin-bottom:10px}
+.cfe-search{flex:1;display:flex;align-items:center;gap:7px;border:1px solid var(--input);border-radius:8px;padding:0 10px;color:var(--muted)}
+.cfe-search input{border:0;outline:0;background:none;height:34px;flex:1;font-size:12px;color:var(--ink)}
+.cfe-count{font-size:10px;color:var(--muted);white-space:nowrap}
+.cfe-empty,.cfe-scanfirst{padding:26px;text-align:center;color:var(--muted);font-size:12px;background:#f7f8fa;border-radius:9px}
+.cfe-group{margin-bottom:14px}
+.cfe-group-title{font-size:9px;text-transform:uppercase;letter-spacing:.1em;color:#5866aa;font-weight:700;margin:8px 0 6px}
+.cfe-group-title small{text-transform:none;letter-spacing:0;color:var(--muted);font-weight:400}
+.cfe-line{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:9px 11px;border:1px solid var(--line);border-radius:9px;margin-bottom:6px;background:#fff}
+.cfe-line.role-in{border-left:3px solid var(--mint)}
+.cfe-line.role-out{border-left:3px solid var(--red)}
+.cfe-line.role-ignore{border-left:3px solid #cfd5df;opacity:.72}
+.cfe-line-name b{display:block;font-size:12px}
+.cfe-line-name small{display:block;color:var(--muted);font-size:10px;margin-top:2px;font-variant-numeric:tabular-nums}
+.cfe-toggle{display:inline-flex;border:1px solid var(--input);border-radius:8px;overflow:hidden;flex-shrink:0}
+.cfe-toggle-btn{display:inline-flex;align-items:center;gap:4px;border:0;background:#fff;color:var(--muted);font-size:10px;padding:6px 9px;cursor:pointer;border-right:1px solid var(--input)}
+.cfe-toggle-btn:last-child{border-right:0}
+.cfe-toggle-btn:hover{background:#f3f5f9}
+.cfe-toggle-btn.in.active{background:#e6f6ee;color:#16815f}
+.cfe-toggle-btn.out.active{background:#fdeaec;color:#bd4d5d}
+.cfe-toggle-btn.ignore.active{background:#eef0f4;color:#4a5468}
+.cfe-custom{margin-top:8px;padding-top:12px;border-top:1px solid var(--line)}
+.cfe-custom-line{display:grid;grid-template-columns:minmax(0,1fr) 120px 130px auto;gap:8px;align-items:center;margin-bottom:7px}
+.cfe-custom-role{height:36px}
+.cfe-preview{position:sticky;top:88px;border:1px solid var(--line);border-radius:11px;background:#fafbfc;padding:14px}
+.cfe-preview-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:4px}
+.cfe-preview-head b{font-size:18px;font-variant-numeric:tabular-nums}
+.cfe-preview-chart{overflow-x:auto}
+.cfe-preview-chart svg{min-width:520px;width:100%;height:210px}
+.cfe-preview-chart .cfe-zero{stroke:#dfe3ea;stroke-dasharray:3 4}
+.cfe-preview-chart .pos{fill:var(--mint)}
+.cfe-preview-chart .neg{fill:var(--red)}
+.cfe-preview-chart .total{fill:var(--blue)}
+.cfe-bar-value{fill:#364057;font-size:9px;font-weight:700}
+.cfe-bar-label{fill:#6f788c;font-size:8px}
+.cfe-recon{margin-top:10px;padding:10px 12px;border-radius:8px;font-size:11px;line-height:1.5}
+.cfe-recon.ok{background:#e9f6f0;color:#16815f}
+.cfe-recon.warn{background:#fff6e8;color:#94611e}
+@media(max-width:960px){.cfe-body{grid-template-columns:1fr}.cfe-preview{position:static}.cfe-balances{grid-template-columns:1fr}}
