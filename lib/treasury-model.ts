@@ -134,6 +134,11 @@ const EXCLUDED_BRIDGE = /net change|net cash|change in cash|operating cash flow|
 // Driver / ratio / count rows: these are model inputs, not cash movements, so they
 // are never offered as cash-flow line items.
 const NON_CASH_LINE = /%|per unit|per seat|per month|per account|number of|no\. of|headcount|head count|growth rate|\brate\b|efficiency|lag in|lead time|as a %|conversion|utilisation|utilization|multiplier|\bindex\b|\bmargin\b|\bdso\b|\bdpo\b|\bdio\b/i;
+// Stock / balance rows: a snapshot held at a point in time, NOT a monthly flow.
+// Summing a balance across months (e.g. a ₹2cr revolver held every month) would
+// invent billions of phantom cash movement, so these are never movement lines —
+// they only ever serve as the opening/closing endpoints of the bridge.
+const STOCK_ROW = /\bbalance\b|outstanding|\bdrawn\b|\bundrawn\b|headroom|available|utili[sz]ed|\bstock\b(?!\s*days)|closing|opening|carried forward|brought forward|\bposition\b/i;
 
 function inflowKeyword(label: string) {
   return /collection|receipt|received|drawdown|borrowing|proceeds|funding|equity|capital raise|cash injection|interest income|management fee income|inflow|revenue|billing|sales(?! incentive)|income(?! tax)/i.test(label);
@@ -150,6 +155,7 @@ export function isCashCandidate(row: ScanRow, assumptionsSheet?: string): boolea
   if (!/[a-z]/i.test(row.label)) return false;   // numeric-only labels are parse artefacts, not real lines
   if (/^[₹$€£]?\s*(?:in\s+)?(?:crore|cr|lakhs?|million|mn|thousands?|000s|units|inr|usd|eur|gbp)$/i.test(row.label.trim())) return false; // bare unit/currency header rows
   if (NON_CASH_LINE.test(row.label)) return false;
+  if (STOCK_ROW.test(row.label)) return false;   // balances are endpoints, never monthly movements
   if (openingCashPattern.test(row.label) || closingCashPattern.test(row.label)) return false;
   if (EXCLUDED_BRIDGE.test(row.label)) return false;
   return true;
@@ -194,6 +200,7 @@ export function buildCashBridge(
 
   rows.forEach((row) => {
     if (row === openingRow || row === closingRow) return;
+    if (STOCK_ROW.test(row.label)) return;   // a balance/stock row is an endpoint, never a summed monthly movement
     const raw = periodTotal(row, start, end);
     if (Math.abs(raw) <= .01) return;
     let signed: number;
