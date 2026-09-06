@@ -1,7 +1,9 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import { CollectionRecord, PaymentRecord, ScanResult, ScanRow, buildCashBridge, findRow, moduleLabels, paymentsForScan, roundDays } from "@/lib/treasury-model";
+import { CashRole, CollectionRecord, CustomCashLine, PaymentRecord, ScanResult, ScanRow, buildCashBridge, findRow, moduleLabels, paymentsForScan, roundDays } from "@/lib/treasury-model";
+
+type CashBridgeOpts = { roles?: Record<string, CashRole>; openingId?: string; closingId?: string; customLines?: CustomCashLine[] };
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -35,16 +37,19 @@ function EntityPicker({ entities, value, onChange }: { entities: string[]; value
   return <Select value={entities.includes(value) ? value : entities[0]} onValueChange={onChange}><SelectTrigger className="entity-select"><SelectValue/></SelectTrigger><SelectContent>{entities.map((e) => <SelectItem value={e} key={e}>{e}</SelectItem>)}</SelectContent></Select>;
 }
 
-function FlowWaterfall({ rows, start, end }: { rows: ScanRow[]; start: number; end: number }) {
-  const all = buildCashBridge(rows,start,end), opening=all[0]?.value??0;
+function FlowWaterfall({ rows, start, end, opts }: { rows: ScanRow[]; start: number; end: number; opts?: CashBridgeOpts }) {
+  const all = buildCashBridge(rows,start,end,opts), opening=all[0]?.value??0;
   const bars=all.map((x,i)=>{if(i===0||x.total)return{...x,from:0,to:x.value};const from=opening+all.slice(1,i).filter((step)=>!step.total).reduce((sum,step)=>sum+step.value,0);return{...x,from,to:from+x.value}});const vals=bars.flatMap((b)=>[b.from,b.to,0]),lo=Math.min(...vals),hi=Math.max(...vals),span=hi-lo||1,W=Math.max(900,bars.length*92),bw=66,pad=30,gap=(W-pad*2-bw*bars.length)/Math.max(1,bars.length-1),y=(v:number)=>220-((v-lo)/span)*175;
   return <div className="waterfall-wrap"><svg viewBox={`0 0 ${W} 310`} role="img" aria-label="Granular cash waterfall from connected model"><line x1="20" y1={y(0)} x2={W-20} y2={y(0)} className="zero-line"/>{bars.map((b,i)=>{const x=pad+i*(bw+gap),yt=y(Math.max(b.from,b.to)),yb=y(Math.min(b.from,b.to));return <g key={`${b.name}-${i}`}><rect x={x} y={yt} width={bw} height={Math.max(3,yb-yt)} rx="5" className={b.total?"total":b.value>=0?"positive":"negative"}/><text x={x+bw/2} y={Math.max(18,yt-8)} textAnchor="middle" className="bar-value">{fmt(b.value)}</text><text x={x+bw/2} y="258" textAnchor="middle" className="bar-label"><tspan x={x+bw/2}>{b.name.split(" ").slice(0,2).join(" ")}</tspan>{b.name.split(" ").length>2&&<tspan x={x+bw/2} dy="12">{b.name.split(" ").slice(2).join(" ")}</tspan>}</text><title>{b.rows?.length?`${b.name}: ${b.rows.join(", ")}`:b.name}</title></g>})}</svg><div className="waterfall-note">Each cash-flow row is counted once. Debt drawdowns, repayments, interest, capex and operating cash are shown separately; any remaining difference is clearly labelled as reconciliation.</div></div>;
 }
 
-export function CashFlowModule({ scan, entity, setEntity, start, end }: { scan: ScanResult; entity: string; setEntity: (v:string)=>void; start:number; end:number }) {
-  const entities=sourceEntities(scan,"cashFlow"),active=entities.includes(entity)?entity:entities[0]||"Group",rows=sourceRows(scan,"cashFlow",active),unit=rows[0]?.unit||rows[0]?.currency||"Model units";
-  const bridge=buildCashBridge(rows,start,end),opening=bridge[0]?.value??0,closing=bridge[bridge.length-1]?.value??0,change=closing-opening;
-  return <div className="module-stack"><section className="panel chart-panel"><div className="panel-head"><div><p className="eyebrow">Direct-method cash flow</p><h2>{active} · {unit}</h2></div><EntityPicker entities={entities} value={active} onChange={setEntity}/></div><div className="module-kpis"><div><span>Opening cash</span><strong>{fmt(opening)}</strong></div><div><span>Net movement</span><strong className={change>=0?"good":"bad"}>{fmt(change)}</strong></div><div><span>Closing cash</span><strong>{fmt(closing)}</strong></div></div><FlowWaterfall rows={rows} start={start} end={end}/></section></div>;
+export function CashFlowModule({ scan, entity, setEntity, start, end, cashRows, bridgeOpts }: { scan: ScanResult; entity: string; setEntity: (v:string)=>void; start:number; end:number; cashRows?: ScanRow[]; bridgeOpts?: CashBridgeOpts }) {
+  const entities=sourceEntities(scan,"cashFlow"),active=entities.includes(entity)?entity:entities[0]||"Group",autoRows=sourceRows(scan,"cashFlow",active);
+  // When the user has curated the cash-flow lines, build the waterfall from that
+  // curated set (which can span the whole workbook, e.g. a P&L); otherwise use the auto-detected cash tab.
+  const curated=!!(bridgeOpts&&bridgeOpts.roles),rows=curated&&cashRows&&cashRows.length?cashRows:autoRows,unit=rows[0]?.unit||rows[0]?.currency||"Model units";
+  const bridge=buildCashBridge(rows,start,end,curated?bridgeOpts:undefined),opening=bridge[0]?.value??0,closing=bridge[bridge.length-1]?.value??0,change=closing-opening;
+  return <div className="module-stack"><section className="panel chart-panel"><div className="panel-head"><div><p className="eyebrow">Direct-method cash flow</p><h2>{active} · {unit}</h2></div>{!curated&&<EntityPicker entities={entities} value={active} onChange={setEntity}/>}</div><div className="module-kpis"><div><span>Opening cash</span><strong>{fmt(opening)}</strong></div><div><span>Net movement</span><strong className={change>=0?"good":"bad"}>{fmt(change)}</strong></div><div><span>Closing cash</span><strong>{fmt(closing)}</strong></div></div><FlowWaterfall rows={rows} start={start} end={end} opts={curated?bridgeOpts:undefined}/></section></div>;
 }
 
 function addMonths(label: string, months: number) {
