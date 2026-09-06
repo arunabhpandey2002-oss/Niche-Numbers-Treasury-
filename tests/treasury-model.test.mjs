@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { SCAN_SCHEMA_VERSION, buildCashBridge, parseWorkbook, paymentsForScan, roundDays } from "../lib/treasury-model.ts";
+import { SCAN_SCHEMA_VERSION, buildCashBridge, cashCandidateRows, defaultCashRoles, parseWorkbook, paymentsForScan, roundDays } from "../lib/treasury-model.ts";
 import { AUTO_SOURCE, SKIP_SOURCE, emptySourceAssignments, resolveSources } from "../lib/model-mapping.ts";
 
 test("detects optional customer collection records", () => {
@@ -143,6 +143,55 @@ test("builds a granular cash bridge with opening cash and separate debt movement
   assert.equal(steps.find((step)=>step.name==="Debt drawdowns")?.value,15);
   assert.equal(steps.find((step)=>step.name==="Interest & fees")?.value,-4);
   assert.equal(steps.at(-1)?.value,93);
+});
+
+test("curated bridge on a P&L (no cash statement) is complete with no reconciliation bar", () => {
+  const row=(label,sheet,values)=>({id:`${sheet}:${label}`,sheet,row:1,label,section:sheet,entity:"Group",currency:"INR",unit:"INR",range:"",values,display:values.map(String)});
+  const rows=[
+    row("Revenue excluding GST","P&L",[100,100]),
+    row("Cost of goods sold","P&L",[40,40]),
+    row("Employee costs","P&L",[20,20]),
+    row("Office rent per seat","P&L",[5,5]),      // driver-shaped -> excluded from candidates
+    row("Total EBITDA","P&L",[35,35]),            // subtotal -> excluded
+    row("Growth rate","Assumptions",[0.1,0.1]),   // assumptions sheet -> excluded
+  ];
+  const candidates=cashCandidateRows(rows,"Assumptions");
+  assert.ok(candidates.some((r)=>r.label==="Revenue excluding GST"));
+  assert.ok(!candidates.some((r)=>r.label==="Total EBITDA"));
+  assert.ok(!candidates.some((r)=>r.label==="Office rent per seat"));
+  assert.ok(!candidates.some((r)=>r.sheet==="Assumptions"));
+
+  const roles=defaultCashRoles(rows,"Assumptions");
+  assert.equal(roles["P&L:Revenue excluding GST"],"in");
+  assert.equal(roles["P&L:Cost of goods sold"],"out");
+  assert.equal(roles["P&L:Employee costs"],"out");
+
+  const steps=buildCashBridge(rows,0,1,{roles,openingId:"",closingId:"",customLines:[{id:"c",name:"Owner funding",role:"in",monthly:10}]});
+  assert.equal(steps[0].name,"Opening cash");
+  assert.equal(steps[0].value,0);
+  assert.ok(!steps.some((s)=>s.name.includes("reconcil")),"no reconciliation bar when closing is derived");
+  const movements=steps.slice(1,-1).reduce((sum,s)=>sum+s.value,0);
+  const closing=steps.at(-1).value;
+  assert.equal(closing,movements,"closing equals the sum of movements");
+  // 200 revenue - 80 cogs - 40 people + 20 owner funding = 100
+  assert.equal(closing,100);
+  assert.ok(steps.some((s)=>s.name==="Owner funding"&&s.value===20),"custom line appears once");
+});
+
+test("curated bridge flags a gap when a closing-cash row disagrees", () => {
+  const row=(label,values)=>({id:label,sheet:"Cash Flow",row:1,label,section:"Cash Flow",entity:"Group",currency:"USD",unit:"USD",range:"",values,display:values.map(String)});
+  const rows=[
+    row("Opening balance",[100,100]),
+    row("Customer receipts",[50,50]),
+    row("Supplier payments",[-20,-20]),
+    row("Closing balance",[300,300]),   // deliberately wrong (should be 100+60=160)
+  ];
+  const roles={"Customer receipts":"in","Supplier payments":"out"};
+  const steps=buildCashBridge(rows,0,1,{roles,openingId:"Opening balance",closingId:"Closing balance"});
+  const recon=steps.find((s)=>s.name.includes("reconcil"));
+  assert.ok(recon,"reconciliation bar shown when closing row disagrees");
+  assert.equal(steps[0].value,100);
+  assert.equal(steps.at(-1).value,300);
 });
 
 test("rounds spreadsheet day drivers to clean whole-day controls", () => {
