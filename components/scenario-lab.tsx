@@ -47,11 +47,13 @@ function effectiveVals(scenario: Scenario, levers: ScenarioLever[]) {
 }
 
 function CompareChart({ series, names, periods, money, connected }: { series: number[][]; names: string[]; periods: string[]; money: (n: number) => string; connected: boolean }) {
-  const all = series.flat().filter(Number.isFinite);
+  const pointCount = periods.length || Math.max(0, ...series.map((values) => values.length));
+  const chartSeries = series.map((values) => Array.from({ length: pointCount }, (_, index) => Number.isFinite(values[index]) ? values[index] : null));
+  const all = chartSeries.flat().filter((value): value is number => value !== null);
   if (!all.length) return <div className="sc-chart-empty">Connect and scan a model to see the cash paths.</div>;
   const lo = Math.min(0, ...all), hi = Math.max(...all), span = hi - lo || 1;
   const W = 720, H = 250, padL = 54, padR = 10, top = 16, bottom = 210;
-  const n = Math.max(1, (series[0]?.length || periods.length) - 1);
+  const n = Math.max(1, pointCount - 1);
   const x = (i: number) => padL + (i / n) * (W - padL - padR);
   const y = (v: number) => bottom - ((v - lo) / span) * (bottom - top);
   return (
@@ -59,19 +61,19 @@ function CompareChart({ series, names, periods, money, connected }: { series: nu
       <svg viewBox={`0 0 ${W} ${H}`} role="img" aria-label="Closing cash by scenario over time">
         {[0,.5,1].map((portion)=>{const value=lo+(hi-lo)*portion,yy=y(value);return <g key={portion}><line x1={padL} y1={yy} x2={W-padR} y2={yy} className="sc-grid"/><text x={padL-8} y={yy+3} textAnchor="end" className="sc-axis">{money(value)}</text></g>})}
         <line x1={padL} y1={y(0)} x2={W - padR} y2={y(0)} className="sc-zero" />
-        {series.map((s, si) => (
+        {chartSeries.map((s, si) => (
           <polyline key={si} fill="none" stroke={COLORS[si % COLORS.length]} strokeWidth="2.5" strokeLinejoin="round" strokeLinecap="round"
-            points={s.map((v, i) => `${x(i)},${y(v)}`).join(" ")} />
+            points={s.flatMap((v, i) => v === null ? [] : [`${x(i)},${y(v)}`]).join(" ")} />
         ))}
-        {series.map((s, si) => Number.isFinite(s[s.length - 1]) ? (
-          <circle key={si} cx={x(s.length - 1)} cy={y(s[s.length - 1])} r="3.5" fill={COLORS[si % COLORS.length]} />
-        ) : null)}
+        {chartSeries.map((s, si) => { const index=s.findLastIndex((value)=>value!==null),value=index>=0?s[index]:null;return value !== null ? (
+          <circle key={si} cx={x(index)} cy={y(value)} r="3.5" fill={COLORS[si % COLORS.length]} />
+        ) : null })}
         <text x={padL} y="230" className="sc-axis">{periods[0] || "Start"}</text>
         <text x={W - padR} y="230" textAnchor="end" className="sc-axis">{periods[periods.length - 1] || "End"}</text>
       </svg>
       <div className="sc-legend">
         {names.map((name, i) => (
-          <span key={i}><i style={{ background: COLORS[i % COLORS.length] }} />{name} · <b>{money(series[i]?.[series[i].length - 1] ?? 0)}</b></span>
+          <span key={i}><i style={{ background: COLORS[i % COLORS.length] }} />{name} · <b>{money(chartSeries[i]?.findLast((value)=>value!==null) ?? 0)}</b></span>
         ))}
       </div>
       {connected&&<p className="sc-chart-note">Base is read from the workbook. Scenario paths are deterministic previews from the selected levers. If the model automatically draws a revolver, closing cash may stay near its minimum while the pre-financing cash impact shows the extra funding need. Write back for the exact recalculated debt and cash result.</p>}
