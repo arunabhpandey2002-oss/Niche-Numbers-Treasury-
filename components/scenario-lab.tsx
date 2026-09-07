@@ -165,7 +165,7 @@ export function ScenarioLab({ periods, levers, connected, compute, money }: Prop
             <tr className="sc-section-row"><td colSpan={scenarios.length + 1}>Results {connected ? "" : "(demo)"}</td></tr>
             {kpis.map((kpi) => (
               <tr key={kpi.key as string} className="sc-kpi-row">
-                <td className="sc-rowhead"><b>{kpi.label}</b></td>
+                <td className="sc-rowhead"><b>{connected&&["closing_cash","runway_months","operating_cash_flow","net_cash_movement"].includes(kpi.key)?`Estimated ${kpi.label.toLowerCase()}`:kpi.label}</b></td>
                 {results.map((result, i) => (
                   <td key={i} className={bestByKpi[kpi.key as string] === i && scenarios.length > 1 ? "sc-best" : ""}>
                     {kpi.fmt(result.out[kpi.key] as number | null, money)}
@@ -177,7 +177,7 @@ export function ScenarioLab({ periods, levers, connected, compute, money }: Prop
         </table>
       </div>
 
-      <div className="sc-chart-head"><p className="eyebrow">Closing cash over time</p><span>{connected ? "Model path versus deterministic scenario preview" : "Demo data."}</span></div>
+      <div className="sc-chart-head"><p className="eyebrow">{connected?"Estimated closing cash over time":"Closing cash over time"}</p><span>{connected ? "Directional comparison — verify through write-back" : "Demo data."}</span></div>
       <CompareChart series={results.map((result) => result.series)} names={scenarios.map((scenario) => scenario.name)} periods={periods} money={money} connected={connected}/>
     </section>
   );
