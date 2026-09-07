@@ -6,7 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
-import { addClarification, askGroq, clarificationFor, groundedText, routeQuestion } from "@/lib/groq-assistant";
+import { addClarification, askGroq, clarificationFor, groundedText, resolveScenarioChanges, routeQuestion } from "@/lib/groq-assistant";
 import type { AssistantChange, AssistantClarification, AssistantEngineState, AssistantOutputs } from "@/lib/groq-assistant";
 
 export type EngineComparison = {
@@ -61,14 +61,18 @@ export function AskModelAssistant({ state, onApply, onReset, canReset }: {
     setPending(null); setBusy(true);
     try {
       const reply = await askGroq(apiKey,routedQuestion,state,history.slice(-2),route);
-      const grounded = groundedText(reply.answer,state);
-      const actions = reply.business_actions.length ? `\n\nPractical actions:\n${reply.business_actions.map((action)=>`• ${action}`).join("\n")}` : "";
-      setMessages((current)=>[...current,{role:"assistant",content:`${grounded}${actions}`}]);
       if (reply.mode === "scenario" && reply.changes.length) {
-        const result=onApply(reply.changes);setComparison(result);
+        const resolved=resolveScenarioChanges(reply.changes,route,state);
+        if(!resolved.length)throw new Error("The requested scenario does not have an available model lever.");
+        const result=onApply(resolved);setComparison(result);
         const runway=`Runway: ${outputText("runway_months",result.before.runway_months)} → ${outputText("runway_months",result.after.runway_months)}`;
         const cash=`Closing cash: ${outputText("closing_cash",result.before.closing_cash)} → ${outputText("closing_cash",result.after.closing_cash)}`;
-        setMessages((current)=>[...current,{role:"assistant",content:`Niche Numbers recomputed the scenario once. ${runway}. ${cash}.`}]);
+        const applied=result.applied.map((lever)=>`${lever.name}: ${lever.from.toLocaleString()} → ${lever.to.toLocaleString()}`).join(" · ");
+        setMessages((current)=>[...current,{role:"assistant",content:`Applied by the scenario engine: ${applied}. Preview result — ${runway}. ${cash}. Write back to verify the exact Google Sheets result.`}]);
+      } else {
+        const grounded = groundedText(reply.answer,state);
+        const actions = reply.business_actions.length ? `\n\nPractical actions:\n${reply.business_actions.map((action)=>`• ${action}`).join("\n")}` : "";
+        setMessages((current)=>[...current,{role:"assistant",content:`${grounded}${actions}`}]);
       }
     } catch (cause) {
       const text = cause instanceof TypeError ? "The browser could not reach Groq. The request may be blocked by the browser or network." : cause instanceof Error ? cause.message : "The AI call failed.";
