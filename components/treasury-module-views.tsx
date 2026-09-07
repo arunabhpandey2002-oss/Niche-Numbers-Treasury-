@@ -111,7 +111,8 @@ export function CustomerCollectionsModule({ scan, start, end, onWriteDriver }: {
   const accountSchedule = selected.some((record) => record.sourceKind === "account_schedule");
   const baseDsoExact = selected.find((record) => record.driverValue !== undefined)?.driverValue || 0;
   const baseDso = roundDays(baseDsoExact);
-  const scenarioDso = roundDays(customerDso[active] ?? baseDso);
+  const scenarioDsoExact = customerDso[active] ?? baseDsoExact;
+  const scenarioDso = roundDays(scenarioDsoExact);
   const effectiveDelay = delay;
   // A discount is an early-payment incentive. Do not silently charge it when
   // the scenario leaves timing unchanged or delays a receipt.
@@ -126,12 +127,12 @@ export function CustomerCollectionsModule({ scan, start, end, onWriteDriver }: {
     baseCash: baseSeries,
     activity: activitySeries,
     baseDays: baseDsoExact,
-    scenarioDays: scenarioDso,
+    scenarioDays: scenarioDsoExact,
     discountPct: appliedDiscount,
   }) : null;
   const invoiceImpact = collectionImpact(periodRecords, scan.periods, effectiveDelay, appliedDiscount, 0);
-  const endCashImpact = rollForward ? total(rollForward.grossSettlement.map((value,index)=>value-rollForward.baseCash[index]),start,end) : total(invoiceImpact.impact,start,end)+invoiceImpact.discountCost;
-  const discountCost = rollForward ? total(rollForward.grossSettlement, start, end) - total(rollForward.scenarioCash, start, end) : invoiceImpact.discountCost;
+  const endCashImpact = rollForward ? total(rollForward.grossSettlement.map((value,index)=>rollForward.baseCash[index]-value),start,end) : total(invoiceImpact.impact,start,end)+invoiceImpact.discountCost;
+  const discountCost = rollForward ? total(rollForward.grossSettlement, start, end)*appliedDiscount : invoiceImpact.discountCost;
   const impact = rollForward ? {
     amount: total(baseSeries, start, end),
     movedEarlier: Math.max(0, endCashImpact),
@@ -147,7 +148,7 @@ export function CustomerCollectionsModule({ scan, start, end, onWriteDriver }: {
   return <section className="panel collections-panel">
     <div className="panel-head"><div><p className="eyebrow">Account-level collections</p><h2>Change one customer without changing everyone else</h2><p>{accountSchedule?"Account-by-month schedule detected. Each month is recalculated directly from the customer DSO and compared with its base value.":"Invoice-level data detected. Model timing and early-payment discounts by customer."}</p></div><Select value={active} onValueChange={setCustomer}><SelectTrigger className="entity-select"><SelectValue/></SelectTrigger><SelectContent>{customers.map((name)=><SelectItem value={name} key={name}>{name}</SelectItem>)}</SelectContent></Select></div>
     <div className="collections-grid"><aside className="collection-controls">
-      {accountSchedule?<div><Label>Customer DSO</Label><strong>{scenarioDso} days · base {baseDso}</strong><Slider min={0} max={180} step={1} value={[scenarioDso]} onValueChange={([value])=>setCustomerDso((current)=>({...current,[active]:value}))}/>{driverCell&&onWriteDriver&&<Button size="sm" onClick={()=>onWriteDriver(driverCell,scenarioDso)} disabled={scenarioDso===baseDso}>Write customer DSO</Button>}</div>:<div><Label>Collection timing</Label><strong>{delay>0?`${delay} month delay`:delay<0?`${Math.abs(delay)} month earlier`:"No timing change"}</strong><Slider min={-3} max={6} step={1} value={[delay]} onValueChange={([v])=>setDelay(v)}/></div>}
+      {accountSchedule?<div><Label>Customer DSO</Label><strong>{scenarioDso} days · base {baseDso}</strong><Slider min={0} max={180} step={1} value={[scenarioDso]} onValueChange={([value])=>setCustomerDso((current)=>({...current,[active]:value===baseDso?baseDsoExact:value}))}/>{driverCell&&onWriteDriver&&<Button size="sm" onClick={()=>onWriteDriver(driverCell,scenarioDsoExact)} disabled={scenarioDsoExact===baseDsoExact}>Write customer DSO</Button>}</div>:<div><Label>Collection timing</Label><strong>{delay>0?`${delay} month delay`:delay<0?`${Math.abs(delay)} month earlier`:"No timing change"}</strong><Slider min={-3} max={6} step={1} value={[delay]} onValueChange={([v])=>setDelay(v)}/></div>}
       <div><Label>Early payment discount</Label><div className="inline-input"><Input type="number" min="0" max="50" step=".25" value={discount} onChange={(e)=>setDiscount(Number(e.target.value)||0)}/><span>%</span></div>{discount>0&&!discountEligible&&<small>Applied only when collection timing is brought forward.</small>}</div>
       <div className="collection-kpis"><div><span>Total period impact</span><strong className={endCashImpact>=0?"good":"bad"}>{fmt(endCashImpact)}</strong></div><div><span>Discount cost</span><strong className="bad">{fmt(impact.discountCost)}</strong></div><div><span>Net benefit</span><strong className={impact.netBenefit>=0?"good":"bad"}>{fmt(impact.netBenefit)}</strong></div></div>
     </aside><div><CollectionsChart periods={scan.periods.slice(start,end+1)} values={impact.impact.slice(start,end+1)} label="Monthly collection cash impact versus base"/><div className="collection-summary"><span>{accountSchedule?`${fmt(endCashImpact)} cumulative cash impact at ${scan.periods[end]}`:`${fmt(impact.movedEarlier)} accelerated`}</span><span>{accountSchedule?"No cash is dropped at the forecast boundary":`${fmt(impact.movedLater)} delayed`}</span><span>{periodRecords.length} records in the selected period</span></div></div></div>
