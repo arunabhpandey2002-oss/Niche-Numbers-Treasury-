@@ -123,6 +123,7 @@
 .sc-grid{stroke:#edf0f5;stroke-width:1}
 .sc-axis{fill:#9aa1b4;font-size:11px}
 .sc-data-label{font-size:10px;font-weight:700;paint-order:stroke;stroke:#fff;stroke-width:3px;stroke-linejoin:round}
+.sc-label-leader{fill:none;stroke-width:1.25;stroke-linecap:round;stroke-linejoin:round}
 .sc-verify{display:flex;gap:5px;justify-content:center;margin-top:7px}.sc-verify button{border:1px solid #aeb9ff;background:#f5f7ff;color:#3447ad;border-radius:6px;padding:5px 7px;font-size:9px;font-weight:700;cursor:pointer}.sc-verify button:disabled{opacity:.55;cursor:wait}
 .sc-legend{display:flex;flex-wrap:wrap;gap:14px;margin-top:8px;font-size:12px;color:#59617a}
 .sc-legend span{display:inline-flex;align-items:center;gap:6px} .sc-legend i{width:11px;height:3px;border-radius:2px;display:inline-block}
