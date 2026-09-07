@@ -148,8 +148,42 @@ function parseMagnitude(question: string): Magnitude | null {
   m = q.match(/(\d+(?:\.\d+)?)\s*(%|percent)\b/);
   if (m) return { mode: "by", value: Number(m[1]), unit: "percent" };
   m = q.match(/(\d+(?:\.\d+)?)\s*(days?|months?)\b/);
-  if (m) return { mode: "to", value: Number(m[1]), unit: unitOf(m[2]) };
+  if (m) {
+    // Natural phrases such as "pay suppliers 10 days faster" describe a
+    // delta, not an absolute ten-day DPO target.
+    const relative = /\b(faster|sooner|quicker|slower|later|earlier|more|less|extra|additional)\b/.test(q);
+    return { mode: relative ? "by" : "to", value: Number(m[1]), unit: unitOf(m[2]) };
+  }
   return null;
+}
+
+/** Convert the LLM's lever suggestion into a deterministic, validated input.
+ * Numeric intent comes from the local parser and current engine state; the LLM
+ * is never trusted to calculate a target value. */
+export function resolveScenarioChanges(changes: AssistantChange[], route: AssistantRoute, state: AssistantEngineState): AssistantChange[] {
+  const available = new Map(state.available_levers.map((lever) => [lever.id, lever]));
+  const directTopic = route.topics.find((topic) => topic === "dso" || topic === "dpo" || topic === "dio");
+  const requested = directTopic && available.has(directTopic)
+    ? [{ lever_id: directTopic, new_value: available.get(directTopic)!.value, reason: changes.find((change) => change.lever_id === directTopic)?.reason || "Selected from the requested scenario." }]
+    : changes;
+  return requested.flatMap((change) => {
+    const lever = available.get(change.lever_id);
+    if (!lever) return [];
+    let value = change.new_value;
+    const magnitude = route.slots.magnitude;
+    if (magnitude && (magnitude.unit === "days" || magnitude.unit === "number") && directTopic === change.lever_id) {
+      if (magnitude.mode === "to" || route.slots.direction === "target") value = magnitude.value;
+      else if (route.slots.direction === "decrease") value = lever.value - magnitude.value;
+      else if (route.slots.direction === "increase") value = lever.value + magnitude.value;
+    } else if (magnitude?.unit === "percent" && magnitude.mode === "by" && directTopic === change.lever_id) {
+      if (route.slots.direction === "decrease") value = lever.value * (1 - magnitude.value / 100);
+      else if (route.slots.direction === "increase") value = lever.value * (1 + magnitude.value / 100);
+    }
+    const step = lever.step > 0 ? lever.step : 1;
+    const digits = Math.max(0, Math.min(6, (String(step).split(".")[1] || "").length));
+    const clamped = Math.max(lever.min, Math.min(lever.max, value));
+    return [{ ...change, new_value: Number((Math.round(clamped / step) * step).toFixed(digits)) }];
+  });
 }
 
 export function routeQuestion(question: string): AssistantRoute {
