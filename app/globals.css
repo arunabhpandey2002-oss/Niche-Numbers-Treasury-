@@ -122,6 +122,7 @@
 .sc-zero{stroke:#d7dbe6;stroke-dasharray:3 3}
 .sc-grid{stroke:#edf0f5;stroke-width:1}
 .sc-axis{fill:#9aa1b4;font-size:11px}
+.sc-data-label{font-size:10px;font-weight:700;paint-order:stroke;stroke:#fff;stroke-width:3px;stroke-linejoin:round}
 .sc-legend{display:flex;flex-wrap:wrap;gap:14px;margin-top:8px;font-size:12px;color:#59617a}
 .sc-legend span{display:inline-flex;align-items:center;gap:6px} .sc-legend i{width:11px;height:3px;border-radius:2px;display:inline-block}
 .sc-legend b{color:#172033;font-variant-numeric:tabular-nums}
