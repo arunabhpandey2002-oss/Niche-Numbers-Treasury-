@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { SCAN_SCHEMA_VERSION, buildCashBridge, cashCandidateRows, defaultCashRoles, parseWorkbook, paymentsForScan, roundDays } from "../lib/treasury-model.ts";
+import { SCAN_SCHEMA_VERSION, buildCashBridge, cashCandidateRows, defaultCashRoles, parseWorkbook, paymentsForScan, roundDays, workingCapitalScheduleImpact } from "../lib/treasury-model.ts";
 import { AUTO_SOURCE, SKIP_SOURCE, emptySourceAssignments, resolveSources } from "../lib/model-mapping.ts";
 
 test("detects optional customer collection records", () => {
@@ -188,7 +188,7 @@ test("curated bridge flags a gap when a closing-cash row disagrees", () => {
   ];
   const roles={"Customer receipts":"in","Supplier payments":"out"};
   const steps=buildCashBridge(rows,0,1,{roles,openingId:"Opening balance",closingId:"Closing balance"});
-  const recon=steps.find((s)=>s.name.includes("reconcil"));
+  const recon=steps.find((s)=>/reconcil/i.test(s.name));
   assert.ok(recon,"reconciliation bar shown when closing row disagrees");
   assert.equal(steps[0].value,100);
   assert.equal(steps.at(-1).value,300);
@@ -197,4 +197,18 @@ test("curated bridge flags a gap when a closing-cash row disagrees", () => {
 test("rounds spreadsheet day drivers to clean whole-day controls", () => {
   assert.equal(roundDays(58.94230769230768),59);
   assert.equal(roundDays(Number.NaN),0);
+});
+
+test("keeps a DSO change in receivables instead of reversing it in the final month", () => {
+  const result = workingCapitalScheduleImpact({ baseCash: [100,100,100], activity: [100,100,100], baseClosing: [100,100,100], baseDays: 30, scenarioDays: 60, kind: "collections" });
+  assert.deepEqual(result.cashImpact, [-100,0,0]);
+  assert.deepEqual(result.cumulativeImpact, [-100,-100,-100]);
+  assert.deepEqual(result.scenarioClosing, [200,200,200]);
+});
+
+test("keeps a DPO change in payables instead of reversing it in the final month", () => {
+  const result = workingCapitalScheduleImpact({ baseCash: [100,100,100], activity: [100,100,100], baseClosing: [100,100,100], baseDays: 30, scenarioDays: 60, kind: "payments" });
+  assert.deepEqual(result.cashImpact, [100,0,0]);
+  assert.deepEqual(result.cumulativeImpact, [100,100,100]);
+  assert.deepEqual(result.scenarioClosing, [200,200,200]);
 });
