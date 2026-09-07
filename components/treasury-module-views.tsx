@@ -1,7 +1,7 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import { CashRole, CollectionRecord, CustomCashLine, PaymentRecord, ScanResult, ScanRow, buildCashBridge, findRow, moduleLabels, paymentsForScan, roundDays, workingCapitalScheduleImpact } from "@/lib/treasury-model";
+import { CashRole, CollectionRecord, CustomCashLine, PaymentRecord, ScanResult, ScanRow, buildCashBridge, directDaysScheduleImpact, findRow, moduleLabels, paymentsForScan, roundDays, workingCapitalScheduleImpact } from "@/lib/treasury-model";
 
 type CashBridgeOpts = { roles?: Record<string, CashRole>; openingId?: string; closingId?: string; customLines?: CustomCashLine[] };
 import { Button } from "@/components/ui/button";
@@ -104,12 +104,13 @@ function CollectionsChart({ periods, values, label="Cash impact" }: { periods: s
 export function CustomerCollectionsModule({ scan, start, end, onWriteDriver }: { scan: ScanResult; start: number; end: number; onWriteDriver?: (range:string,value:number)=>void }) {
   const records = scan.collections, customers = useMemo(() => [...new Set(scan.collections.map((record) => record.customer))], [scan.collections]);
   const [customer,setCustomer]=useState(customers[0]||"");
-  const [delay,setDelay]=useState(0), [discount,setDiscount]=useState(0), [annualRate,setAnnualRate]=useState(14);
+  const [delay,setDelay]=useState(0), [discount,setDiscount]=useState(0);
   const [customerDso,setCustomerDso]=useState<Record<string,number>>({});
   const active = customers.includes(customer) ? customer : customers[0] || "";
   const selected = active ? records.filter((record) => record.customer === active) : records;
   const accountSchedule = selected.some((record) => record.sourceKind === "account_schedule");
-  const baseDso = roundDays(selected.find((record) => record.driverValue !== undefined)?.driverValue || 0);
+  const baseDsoExact = selected.find((record) => record.driverValue !== undefined)?.driverValue || 0;
+  const baseDso = roundDays(baseDsoExact);
   const scenarioDso = roundDays(customerDso[active] ?? baseDso);
   const effectiveDelay = delay;
   // A discount is an early-payment incentive. Do not silently charge it when
@@ -121,42 +122,34 @@ export function CustomerCollectionsModule({ scan, start, end, onWriteDriver }: {
   const activitySeries = accountSchedule
     ? accountModelSeries(scan, selected[0]?.sheet || "", active, /billings|sales|revenue|invoices? raised|credit sales/i) || baseSeries
     : baseSeries;
-  const baseClosingSeries = accountSchedule
-    ? accountModelSeries(scan, selected[0]?.sheet || "", active, /closing receivables?|closing ar|accounts receivable/i)
-    : undefined;
-  const rollForward = accountSchedule ? workingCapitalScheduleImpact({
+  const rollForward = accountSchedule ? directDaysScheduleImpact({
     baseCash: baseSeries,
     activity: activitySeries,
-    baseClosing: baseClosingSeries,
-    baseDays: baseDso,
+    baseDays: baseDsoExact,
     scenarioDays: scenarioDso,
-    kind: "collections",
     discountPct: appliedDiscount,
   }) : null;
-  const invoiceImpact = collectionImpact(periodRecords, scan.periods, effectiveDelay, appliedDiscount, annualRate / 100);
-  const endCashImpact = rollForward?.cumulativeImpact[end] ?? 0;
-  const selectedActivity = total(activitySeries, start, end);
+  const invoiceImpact = collectionImpact(periodRecords, scan.periods, effectiveDelay, appliedDiscount, 0);
+  const endCashImpact = rollForward ? total(rollForward.grossSettlement.map((value,index)=>value-rollForward.baseCash[index]),start,end) : total(invoiceImpact.impact,start,end)+invoiceImpact.discountCost;
   const discountCost = rollForward ? total(rollForward.grossSettlement, start, end) - total(rollForward.scenarioCash, start, end) : invoiceImpact.discountCost;
-  const financingBenefit = rollForward ? selectedActivity * (annualRate / 100) * (baseDso - scenarioDso) / 365 : invoiceImpact.financingBenefit;
   const impact = rollForward ? {
     amount: total(baseSeries, start, end),
     movedEarlier: Math.max(0, endCashImpact),
     movedLater: Math.max(0, -endCashImpact),
     discountCost,
-    financingBenefit,
-    netBenefit: financingBenefit - discountCost,
+    financingBenefit: 0,
+    netBenefit: endCashImpact - discountCost,
     impact: scoped(rollForward.cashImpact, start, end),
-  } : invoiceImpact;
+  } : {...invoiceImpact,netBenefit:endCashImpact-discountCost};
   const topCustomers = customers.map((name) => ({ name, amount: records.filter((record) => record.customer === name).reduce((s, record) => s + record.amount * (record.probability ?? 1), 0) })).sort((a,b)=>b.amount-a.amount).slice(0,8);
   if (!records.length) return <section className="panel empty-module"><h2>Customer collections are optional</h2><p>If your model has customer, invoice, due date, expected collection date and amount columns, this tab will activate automatically. If not, treasury still works from cash flow, AR/AP or DSO.</p></section>;
   const driverCell=selected.find((record)=>record.driverCell)?.driverCell;
   return <section className="panel collections-panel">
-    <div className="panel-head"><div><p className="eyebrow">Account-level collections</p><h2>Change one customer without changing everyone else</h2><p>{accountSchedule?"Account-by-month schedule detected. DSO changes use an AR roll-forward, with no whole-month rounding.":"Invoice-level data detected. Model timing and early-payment discounts by customer."}</p></div><Select value={active} onValueChange={setCustomer}><SelectTrigger className="entity-select"><SelectValue/></SelectTrigger><SelectContent>{customers.map((name)=><SelectItem value={name} key={name}>{name}</SelectItem>)}</SelectContent></Select></div>
+    <div className="panel-head"><div><p className="eyebrow">Account-level collections</p><h2>Change one customer without changing everyone else</h2><p>{accountSchedule?"Account-by-month schedule detected. Each month is recalculated directly from the customer DSO and compared with its base value.":"Invoice-level data detected. Model timing and early-payment discounts by customer."}</p></div><Select value={active} onValueChange={setCustomer}><SelectTrigger className="entity-select"><SelectValue/></SelectTrigger><SelectContent>{customers.map((name)=><SelectItem value={name} key={name}>{name}</SelectItem>)}</SelectContent></Select></div>
     <div className="collections-grid"><aside className="collection-controls">
       {accountSchedule?<div><Label>Customer DSO</Label><strong>{scenarioDso} days · base {baseDso}</strong><Slider min={0} max={180} step={1} value={[scenarioDso]} onValueChange={([value])=>setCustomerDso((current)=>({...current,[active]:value}))}/>{driverCell&&onWriteDriver&&<Button size="sm" onClick={()=>onWriteDriver(driverCell,scenarioDso)} disabled={scenarioDso===baseDso}>Write customer DSO</Button>}</div>:<div><Label>Collection timing</Label><strong>{delay>0?`${delay} month delay`:delay<0?`${Math.abs(delay)} month earlier`:"No timing change"}</strong><Slider min={-3} max={6} step={1} value={[delay]} onValueChange={([v])=>setDelay(v)}/></div>}
       <div><Label>Early payment discount</Label><div className="inline-input"><Input type="number" min="0" max="50" step=".25" value={discount} onChange={(e)=>setDiscount(Number(e.target.value)||0)}/><span>%</span></div>{discount>0&&!discountEligible&&<small>Applied only when collection timing is brought forward.</small>}</div>
-      <div><Label>Cost of lending / borrowing</Label><div className="inline-input"><Input type="number" min="0" max="60" step=".25" value={annualRate} onChange={(e)=>setAnnualRate(Number(e.target.value)||0)}/><span>% p.a.</span></div></div>
-      <div className="collection-kpis"><div><span>{accountSchedule?"End-period cash impact":"Selected cash"}</span><strong className={endCashImpact>=0?"good":"bad"}>{fmt(accountSchedule?endCashImpact:impact.amount)}</strong></div><div><span>Discount cost</span><strong className="bad">{fmt(impact.discountCost)}</strong></div><div><span>Financing benefit</span><strong className={impact.financingBenefit>=0?"good":"bad"}>{fmt(impact.financingBenefit)}</strong></div><div><span>Net benefit</span><strong className={impact.netBenefit>=0?"good":"bad"}>{fmt(impact.netBenefit)}</strong></div></div>
+      <div className="collection-kpis"><div><span>Total period impact</span><strong className={endCashImpact>=0?"good":"bad"}>{fmt(endCashImpact)}</strong></div><div><span>Discount cost</span><strong className="bad">{fmt(impact.discountCost)}</strong></div><div><span>Net benefit</span><strong className={impact.netBenefit>=0?"good":"bad"}>{fmt(impact.netBenefit)}</strong></div></div>
     </aside><div><CollectionsChart periods={scan.periods.slice(start,end+1)} values={impact.impact.slice(start,end+1)} label="Monthly collection cash impact versus base"/><div className="collection-summary"><span>{accountSchedule?`${fmt(endCashImpact)} cumulative cash impact at ${scan.periods[end]}`:`${fmt(impact.movedEarlier)} accelerated`}</span><span>{accountSchedule?"No cash is dropped at the forecast boundary":`${fmt(impact.movedLater)} delayed`}</span><span>{periodRecords.length} records in the selected period</span></div></div></div>
     <div className="table-scroll model-table"><Table><TableHeader><TableRow><TableHead className="sticky-col">{accountSchedule?"Month":"Customer / invoice"}</TableHead><TableHead>{accountSchedule?"Base collection":"Expected"}</TableHead><TableHead>{accountSchedule?"Scenario collection":"Scenario"}</TableHead><TableHead className="number">{accountSchedule?"Cash impact":"Amount"}</TableHead><TableHead className="number">{accountSchedule?"Cumulative":"Probability"}</TableHead><TableHead>Write-back cell</TableHead></TableRow></TableHeader><TableBody>{accountSchedule&&rollForward?scan.periods.slice(start,end+1).map((period,offset)=>{const index=start+offset;return <TableRow key={period}><TableCell className="sticky-col"><b>{period}</b><small>{active}</small></TableCell><TableCell>{fmt(rollForward.baseCash[index])}</TableCell><TableCell>{fmt(rollForward.scenarioCash[index])}</TableCell><TableCell className="number">{fmt(rollForward.cashImpact[index])}</TableCell><TableCell className="number">{fmt(rollForward.cumulativeImpact[index])}</TableCell><TableCell><small>{driverCell||"Preview only"}</small></TableCell></TableRow>}):periodRecords.slice(0,40).map((record)=><TableRow key={record.id}><TableCell className="sticky-col"><b>{record.customer}</b><small>{record.invoice||record.sheet}</small></TableCell><TableCell>{record.expectedMonth||record.dueMonth}</TableCell><TableCell>{addMonths(record.expectedMonth||record.dueMonth,effectiveDelay)}</TableCell><TableCell className="number">{fmt(record.amount)}</TableCell><TableCell className="number">{record.probability===undefined?"Optional":`${(record.probability*100).toFixed(0)}%`}</TableCell><TableCell><small>{record.driverCell||record.dateCell||"Preview only"}{record.discountCell?` · ${record.discountCell}`:""}</small></TableCell></TableRow>)}</TableBody></Table></div>
     <div className="top-customers"><strong>Largest detected customers</strong>{topCustomers.map((item)=><button key={item.name} onClick={()=>setCustomer(item.name)} className={item.name===active?"on":""}><span>{item.name}</span><b>{fmt(item.amount)}</b></button>)}</div>
