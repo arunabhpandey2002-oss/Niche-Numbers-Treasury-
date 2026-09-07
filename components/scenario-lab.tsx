@@ -52,7 +52,7 @@ function CompareChart({ series, names, periods, money, connected }: { series: nu
   const all = chartSeries.flat().filter((value): value is number => value !== null);
   if (!all.length) return <div className="sc-chart-empty">Connect and scan a model to see the cash paths.</div>;
   const lo = Math.min(0, ...all), hi = Math.max(...all), span = hi - lo || 1;
-  const W = 720, H = 250, padL = 54, padR = 10, top = 16, bottom = 210;
+  const W = 820, H = 270, padL = 54, padR = 125, top = 22, bottom = 220;
   const n = Math.max(1, pointCount - 1);
   const x = (i: number) => padL + (i / n) * (W - padL - padR);
   const y = (v: number) => bottom - ((v - lo) / span) * (bottom - top);
@@ -65,18 +65,19 @@ function CompareChart({ series, names, periods, money, connected }: { series: nu
           <polyline key={si} fill="none" stroke={COLORS[si % COLORS.length]} strokeWidth="2.5" strokeLinejoin="round" strokeLinecap="round"
             points={s.flatMap((v, i) => v === null ? [] : [`${x(i)},${y(v)}`]).join(" ")} />
         ))}
+        {chartSeries.map((s, si) => s.map((value,index)=>value===null?null:<circle key={`${si}-${index}`} cx={x(index)} cy={y(value)} r="3" fill={COLORS[si % COLORS.length]}><title>{`${names[si]} · ${periods[index]||`Period ${index+1}`} · ${money(value)}`}</title></circle>))}
         {chartSeries.map((s, si) => { const index=s.findLastIndex((value)=>value!==null),value=index>=0?s[index]:null;return value !== null ? (
-          <circle key={si} cx={x(index)} cy={y(value)} r="3.5" fill={COLORS[si % COLORS.length]} />
+          <g key={si}><line x1={x(index)+4} y1={y(value)} x2={x(index)+10} y2={y(value)} stroke={COLORS[si % COLORS.length]}/><text x={x(index)+13} y={y(value)+4+si*11} className="sc-data-label" fill={COLORS[si % COLORS.length]}>{names[si]}: {money(value)}</text></g>
         ) : null })}
-        <text x={padL} y="230" className="sc-axis">{periods[0] || "Start"}</text>
-        <text x={W - padR} y="230" textAnchor="end" className="sc-axis">{periods[periods.length - 1] || "End"}</text>
+        <text x={padL} y="244" className="sc-axis">{periods[0] || "Start"}</text>
+        <text x={W - padR} y="244" textAnchor="end" className="sc-axis">{periods[periods.length - 1] || "End"}</text>
       </svg>
       <div className="sc-legend">
         {names.map((name, i) => (
           <span key={i}><i style={{ background: COLORS[i % COLORS.length] }} />{name} · <b>{money(chartSeries[i]?.findLast((value)=>value!==null) ?? 0)}</b></span>
         ))}
       </div>
-      {connected&&<p className="sc-chart-note">Base is read from the workbook. Scenario paths are deterministic previews from the selected levers. If the model automatically draws a revolver, closing cash may stay near its minimum while the pre-financing cash impact shows the extra funding need. Write back for the exact recalculated debt and cash result.</p>}
+      {connected&&<p className="sc-chart-note"><b>Preview only.</b> Base is read from the workbook, but comparison paths do not execute the workbook formulas. Use the chat&rsquo;s confirmed write-back flow to obtain an exact, recalculated Google Sheets result.</p>}
     </div>
   );
 }
