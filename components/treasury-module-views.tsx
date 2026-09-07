@@ -1,7 +1,7 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import { CashRole, CollectionRecord, CustomCashLine, PaymentRecord, ScanResult, ScanRow, buildCashBridge, findRow, moduleLabels, paymentsForScan, roundDays } from "@/lib/treasury-model";
+import { CashRole, CollectionRecord, CustomCashLine, PaymentRecord, ScanResult, ScanRow, buildCashBridge, findRow, moduleLabels, paymentsForScan, roundDays, workingCapitalScheduleImpact } from "@/lib/treasury-model";
 
 type CashBridgeOpts = { roles?: Record<string, CashRole>; openingId?: string; closingId?: string; customLines?: CustomCashLine[] };
 import { Button } from "@/components/ui/button";
@@ -27,6 +27,21 @@ const displayValue = (row: ScanRow, index: number) => {
   if (/^[\s$€£₹+\-(),.\d]+$/.test(raw)) return fmt(value);
   return raw;
 };
+
+const accountKey = (value: string) => value.toLowerCase().replace(/[^a-z0-9]/g, "");
+const recordsToSeries = (records: (CollectionRecord | PaymentRecord)[], periods: string[]) => {
+  const values = Array(periods.length).fill(0) as number[];
+  records.forEach((record) => {
+    const index = monthIndex(periods, record.expectedMonth || record.dueMonth);
+    if (index >= 0) values[index] += Math.abs(record.amount) * (record.probability ?? 1);
+  });
+  return values;
+};
+const accountModelSeries = (scan: ScanResult, sheet: string, account: string, pattern: RegExp) => {
+  const key = accountKey(account);
+  return scan.rows.find((row) => row.sheet === sheet && accountKey(row.label) === key && pattern.test(`${row.section} ${row.label}`))?.values.map((value) => Math.abs(value));
+};
+const scoped = (values: number[], start: number, end: number) => values.map((value, index) => index >= start && index <= end ? value : 0);
 
 export function Coverage({ scan, onScan, busy }: { scan: ScanResult | null; onScan: () => void; busy: boolean }) {
   return <section className="coverage"><div><span className="coverage-title">Model depth</span>{scan ? <><strong>{scan.modules.length} treasury modules detected</strong><small>{scan.sheets.length} tabs · {scan.periods.length} periods · {scan.rows.length} usable model lines</small></> : <><strong>Automatic model scan not run</strong><small>Scan the workbook to activate only the modules it contains.</small></>}</div><div className="module-chips">{(Object.keys(moduleLabels) as (keyof typeof moduleLabels)[]).map((id) => <span key={id} className={scan?.modules.includes(id) ? "found" : "missing"}>{moduleLabels[id]}<i>{scan?.modules.includes(id) ? "Found" : "Optional"}</i></span>)}</div><Button onClick={onScan} disabled={busy}><ScanSearch size={15}/>{busy ? "Scanning…" : scan ? "Scan again" : "Scan model"}</Button></section>;
@@ -72,7 +87,7 @@ function collectionImpact(records: CollectionRecord[], periods: string[], delayM
     if (baseIndex >= 0) base[baseIndex] += weighted;
     if (scenarioIndex >= 0) scenario[scenarioIndex] += weighted * (1 - discountPct);
     discountCost += weighted * discountPct;
-    const daysMoved = (baseIndex - scenarioIndex) * 30.4;
+    const daysMoved = -delayMonths * 30.4;
     if (daysMoved > 0) { movedEarlier += weighted; financingBenefit += weighted * annualRate * daysMoved / 365; }
     if (daysMoved < 0) movedLater += weighted;
   });
@@ -96,13 +111,56 @@ export function CustomerCollectionsModule({ scan, start, end, onWriteDriver }: {
   const accountSchedule = selected.some((record) => record.sourceKind === "account_schedule");
   const baseDso = roundDays(selected.find((record) => record.driverValue !== undefined)?.driverValue || 0);
   const scenarioDso = roundDays(customerDso[active] ?? baseDso);
-  const effectiveDelay = accountSchedule ? Math.round((scenarioDso - baseDso) / 30.4) : delay;
+  const effectiveDelay = delay;
+  // A discount is an early-payment incentive. Do not silently charge it when
+  // the scenario leaves timing unchanged or delays a receipt.
+  const discountEligible = accountSchedule ? scenarioDso < baseDso : effectiveDelay < 0;
+  const appliedDiscount = discountEligible ? discount / 100 : 0;
   const periodRecords = selected.filter((record) => { const i=monthIndex(scan.periods,record.expectedMonth||record.dueMonth); return i < 0 || (i >= start && i <= end); });
-  const impact = collectionImpact(periodRecords, scan.periods, effectiveDelay, discount / 100, annualRate / 100);
+  const baseSeries = recordsToSeries(selected, scan.periods);
+  const activitySeries = accountSchedule
+    ? accountModelSeries(scan, selected[0]?.sheet || "", active, /billings|sales|revenue|invoices? raised|credit sales/i) || baseSeries
+    : baseSeries;
+  const baseClosingSeries = accountSchedule
+    ? accountModelSeries(scan, selected[0]?.sheet || "", active, /closing receivables?|closing ar|accounts receivable/i)
+    : undefined;
+  const rollForward = accountSchedule ? workingCapitalScheduleImpact({
+    baseCash: baseSeries,
+    activity: activitySeries,
+    baseClosing: baseClosingSeries,
+    baseDays: baseDso,
+    scenarioDays: scenarioDso,
+    kind: "collections",
+    discountPct: appliedDiscount,
+  }) : null;
+  const invoiceImpact = collectionImpact(periodRecords, scan.periods, effectiveDelay, appliedDiscount, annualRate / 100);
+  const endCashImpact = rollForward?.cumulativeImpact[end] ?? 0;
+  const selectedActivity = total(activitySeries, start, end);
+  const discountCost = rollForward ? total(rollForward.grossSettlement, start, end) - total(rollForward.scenarioCash, start, end) : invoiceImpact.discountCost;
+  const financingBenefit = rollForward ? selectedActivity * (annualRate / 100) * (baseDso - scenarioDso) / 365 : invoiceImpact.financingBenefit;
+  const impact = rollForward ? {
+    amount: total(baseSeries, start, end),
+    movedEarlier: Math.max(0, endCashImpact),
+    movedLater: Math.max(0, -endCashImpact),
+    discountCost,
+    financingBenefit,
+    netBenefit: financingBenefit - discountCost,
+    impact: scoped(rollForward.cashImpact, start, end),
+  } : invoiceImpact;
   const topCustomers = customers.map((name) => ({ name, amount: records.filter((record) => record.customer === name).reduce((s, record) => s + record.amount * (record.probability ?? 1), 0) })).sort((a,b)=>b.amount-a.amount).slice(0,8);
   if (!records.length) return <section className="panel empty-module"><h2>Customer collections are optional</h2><p>If your model has customer, invoice, due date, expected collection date and amount columns, this tab will activate automatically. If not, treasury still works from cash flow, AR/AP or DSO.</p></section>;
   const driverCell=selected.find((record)=>record.driverCell)?.driverCell;
-  return <section className="panel collections-panel"><div className="panel-head"><div><p className="eyebrow">Account-level collections</p><h2>Change one customer without changing everyone else</h2><p>{accountSchedule?"Account-by-month schedule detected. Customer collection days can be changed directly.":"Invoice-level data detected. Model timing and early-payment discounts by customer."}</p></div><Select value={active} onValueChange={setCustomer}><SelectTrigger className="entity-select"><SelectValue/></SelectTrigger><SelectContent>{customers.map((name)=><SelectItem value={name} key={name}>{name}</SelectItem>)}</SelectContent></Select></div><div className="collections-grid"><aside className="collection-controls">{accountSchedule?<div><Label>Customer DSO</Label><strong>{scenarioDso} days · base {baseDso}</strong><Slider min={0} max={180} step={1} value={[scenarioDso]} onValueChange={([value])=>setCustomerDso((current)=>({...current,[active]:value}))}/>{driverCell&&onWriteDriver&&<Button size="sm" onClick={()=>onWriteDriver(driverCell,scenarioDso)} disabled={scenarioDso===baseDso}>Write customer DSO</Button>}</div>:<div><Label>Collection timing</Label><strong>{delay>0?`${delay} month delay`:delay<0?`${Math.abs(delay)} month earlier`:"No timing change"}</strong><Slider min={-3} max={6} step={1} value={[delay]} onValueChange={([v])=>setDelay(v)}/></div>}<div><Label>Early payment discount</Label><div className="inline-input"><Input type="number" min="0" max="50" step=".25" value={discount} onChange={(e)=>setDiscount(Number(e.target.value)||0)}/><span>%</span></div></div><div><Label>Cost of lending / borrowing</Label><div className="inline-input"><Input type="number" min="0" max="60" step=".25" value={annualRate} onChange={(e)=>setAnnualRate(Number(e.target.value)||0)}/><span>% p.a.</span></div></div><div className="collection-kpis"><div><span>Selected cash</span><strong>{fmt(impact.amount)}</strong></div><div><span>Discount cost</span><strong className="bad">{fmt(impact.discountCost)}</strong></div><div><span>Financing benefit</span><strong className="good">{fmt(impact.financingBenefit)}</strong></div><div><span>Net benefit</span><strong className={impact.netBenefit>=0?"good":"bad"}>{fmt(impact.netBenefit)}</strong></div></div></aside><div><CollectionsChart periods={scan.periods} values={impact.impact}/><div className="collection-summary"><span>{fmt(impact.movedEarlier)} accelerated</span><span>{fmt(impact.movedLater)} delayed</span><span>{periodRecords.length} records in the selected period</span></div></div></div><div className="table-scroll model-table"><Table><TableHeader><TableRow><TableHead className="sticky-col">Customer / invoice</TableHead><TableHead>Expected</TableHead><TableHead>Scenario</TableHead><TableHead className="number">Amount</TableHead><TableHead className="number">Probability</TableHead><TableHead>Write-back cell</TableHead></TableRow></TableHeader><TableBody>{periodRecords.slice(0,40).map((record)=><TableRow key={record.id}><TableCell className="sticky-col"><b>{record.customer}</b><small>{record.invoice||record.sheet}</small></TableCell><TableCell>{record.expectedMonth||record.dueMonth}</TableCell><TableCell>{addMonths(record.expectedMonth||record.dueMonth,effectiveDelay)}</TableCell><TableCell className="number">{fmt(record.amount)}</TableCell><TableCell className="number">{record.probability===undefined?"Optional":`${(record.probability*100).toFixed(0)}%`}</TableCell><TableCell><small>{record.driverCell||record.dateCell||"Preview only"}{record.discountCell?` · ${record.discountCell}`:""}</small></TableCell></TableRow>)}</TableBody></Table></div><div className="top-customers"><strong>Largest detected customers</strong>{topCustomers.map((item)=><button key={item.name} onClick={()=>setCustomer(item.name)} className={item.name===active?"on":""}><span>{item.name}</span><b>{fmt(item.amount)}</b></button>)}</div></section>;
+  return <section className="panel collections-panel">
+    <div className="panel-head"><div><p className="eyebrow">Account-level collections</p><h2>Change one customer without changing everyone else</h2><p>{accountSchedule?"Account-by-month schedule detected. DSO changes use an AR roll-forward, with no whole-month rounding.":"Invoice-level data detected. Model timing and early-payment discounts by customer."}</p></div><Select value={active} onValueChange={setCustomer}><SelectTrigger className="entity-select"><SelectValue/></SelectTrigger><SelectContent>{customers.map((name)=><SelectItem value={name} key={name}>{name}</SelectItem>)}</SelectContent></Select></div>
+    <div className="collections-grid"><aside className="collection-controls">
+      {accountSchedule?<div><Label>Customer DSO</Label><strong>{scenarioDso} days · base {baseDso}</strong><Slider min={0} max={180} step={1} value={[scenarioDso]} onValueChange={([value])=>setCustomerDso((current)=>({...current,[active]:value}))}/>{driverCell&&onWriteDriver&&<Button size="sm" onClick={()=>onWriteDriver(driverCell,scenarioDso)} disabled={scenarioDso===baseDso}>Write customer DSO</Button>}</div>:<div><Label>Collection timing</Label><strong>{delay>0?`${delay} month delay`:delay<0?`${Math.abs(delay)} month earlier`:"No timing change"}</strong><Slider min={-3} max={6} step={1} value={[delay]} onValueChange={([v])=>setDelay(v)}/></div>}
+      <div><Label>Early payment discount</Label><div className="inline-input"><Input type="number" min="0" max="50" step=".25" value={discount} onChange={(e)=>setDiscount(Number(e.target.value)||0)}/><span>%</span></div>{discount>0&&!discountEligible&&<small>Applied only when collection timing is brought forward.</small>}</div>
+      <div><Label>Cost of lending / borrowing</Label><div className="inline-input"><Input type="number" min="0" max="60" step=".25" value={annualRate} onChange={(e)=>setAnnualRate(Number(e.target.value)||0)}/><span>% p.a.</span></div></div>
+      <div className="collection-kpis"><div><span>{accountSchedule?"End-period cash impact":"Selected cash"}</span><strong className={endCashImpact>=0?"good":"bad"}>{fmt(accountSchedule?endCashImpact:impact.amount)}</strong></div><div><span>Discount cost</span><strong className="bad">{fmt(impact.discountCost)}</strong></div><div><span>Financing benefit</span><strong className={impact.financingBenefit>=0?"good":"bad"}>{fmt(impact.financingBenefit)}</strong></div><div><span>Net benefit</span><strong className={impact.netBenefit>=0?"good":"bad"}>{fmt(impact.netBenefit)}</strong></div></div>
+    </aside><div><CollectionsChart periods={scan.periods} values={impact.impact} label="Monthly collection cash impact versus base"/><div className="collection-summary"><span>{accountSchedule?`${fmt(endCashImpact)} cumulative cash impact at ${scan.periods[end]}`:`${fmt(impact.movedEarlier)} accelerated`}</span><span>{accountSchedule?"No cash is dropped at the forecast boundary":`${fmt(impact.movedLater)} delayed`}</span><span>{periodRecords.length} records in the selected period</span></div></div></div>
+    <div className="table-scroll model-table"><Table><TableHeader><TableRow><TableHead className="sticky-col">{accountSchedule?"Month":"Customer / invoice"}</TableHead><TableHead>{accountSchedule?"Base collection":"Expected"}</TableHead><TableHead>{accountSchedule?"Scenario collection":"Scenario"}</TableHead><TableHead className="number">{accountSchedule?"Cash impact":"Amount"}</TableHead><TableHead className="number">{accountSchedule?"Cumulative":"Probability"}</TableHead><TableHead>Write-back cell</TableHead></TableRow></TableHeader><TableBody>{accountSchedule&&rollForward?scan.periods.slice(start,end+1).map((period,offset)=>{const index=start+offset;return <TableRow key={period}><TableCell className="sticky-col"><b>{period}</b><small>{active}</small></TableCell><TableCell>{fmt(rollForward.baseCash[index])}</TableCell><TableCell>{fmt(rollForward.scenarioCash[index])}</TableCell><TableCell className="number">{fmt(rollForward.cashImpact[index])}</TableCell><TableCell className="number">{fmt(rollForward.cumulativeImpact[index])}</TableCell><TableCell><small>{driverCell||"Preview only"}</small></TableCell></TableRow>}):periodRecords.slice(0,40).map((record)=><TableRow key={record.id}><TableCell className="sticky-col"><b>{record.customer}</b><small>{record.invoice||record.sheet}</small></TableCell><TableCell>{record.expectedMonth||record.dueMonth}</TableCell><TableCell>{addMonths(record.expectedMonth||record.dueMonth,effectiveDelay)}</TableCell><TableCell className="number">{fmt(record.amount)}</TableCell><TableCell className="number">{record.probability===undefined?"Optional":`${(record.probability*100).toFixed(0)}%`}</TableCell><TableCell><small>{record.driverCell||record.dateCell||"Preview only"}{record.discountCell?` · ${record.discountCell}`:""}</small></TableCell></TableRow>)}</TableBody></Table></div>
+    <div className="top-customers"><strong>Largest detected customers</strong>{topCustomers.map((item)=><button key={item.name} onClick={()=>setCustomer(item.name)} className={item.name===active?"on":""}><span>{item.name}</span><b>{fmt(item.amount)}</b></button>)}</div>
+  </section>;
 }
 
 function paymentImpact(records: PaymentRecord[], periods: string[], delayMonths: number, discountPct: number, annualRate: number) {
@@ -115,7 +173,7 @@ function paymentImpact(records: PaymentRecord[], periods: string[], delayMonths:
     if (baseIndex >= 0) base[baseIndex] -= weighted;
     if (scenarioIndex >= 0) scenario[scenarioIndex] -= weighted * (1 - discountPct);
     discountBenefit += weighted * discountPct;
-    const daysMoved = (baseIndex - scenarioIndex) * 30.4;
+    const daysMoved = -delayMonths * 30.4;
     if (daysMoved > 0) { movedEarlier += weighted; financingCost += weighted * annualRate * daysMoved / 365; }
     if (daysMoved < 0) movedLater += weighted;
   });
@@ -129,13 +187,39 @@ export function SupplierPaymentsModule({ scan, start, end, onWriteDriver }: { sc
   const [supplierDpo,setSupplierDpo]=useState<Record<string,number>>({});
   const active=suppliers.includes(supplier)?supplier:suppliers[0]||"", selected=active?records.filter((record)=>record.supplier===active):records;
   const accountSchedule=selected.some((record)=>record.sourceKind==="account_schedule"), baseDpo=roundDays(selected.find((record)=>record.driverValue!==undefined)?.driverValue||0);
-  const scenarioDpo=roundDays(supplierDpo[active]??baseDpo), effectiveDelay=accountSchedule?Math.round((scenarioDpo-baseDpo)/30.4):delay;
+  const scenarioDpo=roundDays(supplierDpo[active]??baseDpo), effectiveDelay=delay;
+  // Supplier discounts only apply when the business actually pays earlier.
+  const discountEligible=accountSchedule?scenarioDpo<baseDpo:effectiveDelay<0;
+  const appliedDiscount=discountEligible?discount/100:0;
   const periodRecords=selected.filter((record)=>{const i=monthIndex(scan.periods,record.expectedMonth||record.dueMonth);return i<0||(i>=start&&i<=end)});
-  const impact=paymentImpact(periodRecords,scan.periods,effectiveDelay,discount/100,annualRate/100);
+  const baseSeries=recordsToSeries(selected,scan.periods);
+  const activitySeries=accountSchedule
+    ? accountModelSeries(scan,selected[0]?.sheet||"",active,/purchases|procurement|cost of goods|cogs|supplier invoices?|materials/i)||baseSeries
+    : baseSeries;
+  const baseClosingSeries=accountSchedule
+    ? accountModelSeries(scan,selected[0]?.sheet||"",active,/closing payables?|closing ap|accounts payable/i)
+    : undefined;
+  const rollForward=accountSchedule?workingCapitalScheduleImpact({baseCash:baseSeries,activity:activitySeries,baseClosing:baseClosingSeries,baseDays:baseDpo,scenarioDays:scenarioDpo,kind:"payments",discountPct:appliedDiscount}):null;
+  const invoiceImpact=paymentImpact(periodRecords,scan.periods,effectiveDelay,appliedDiscount,annualRate/100);
+  const endCashImpact=rollForward?.cumulativeImpact[end]??0;
+  const selectedActivity=total(activitySeries,start,end);
+  const discountBenefit=rollForward?total(rollForward.grossSettlement,start,end)-total(rollForward.scenarioCash,start,end):invoiceImpact.discountBenefit;
+  const financingCost=rollForward?selectedActivity*(annualRate/100)*(baseDpo-scenarioDpo)/365:invoiceImpact.financingCost;
+  const impact=rollForward?{amount:total(baseSeries,start,end),movedEarlier:Math.max(0,-endCashImpact),movedLater:Math.max(0,endCashImpact),discountBenefit,financingCost,netBenefit:discountBenefit-financingCost,impact:scoped(rollForward.cashImpact,start,end)}:invoiceImpact;
   const topSuppliers=suppliers.map((name)=>({name,amount:records.filter((record)=>record.supplier===name).reduce((sum,record)=>sum+record.amount*(record.probability??1),0)})).sort((a,b)=>b.amount-a.amount).slice(0,8);
   if(!records.length)return <section className="panel empty-module"><h2>Supplier-level payments are optional</h2><p>Map a creditor or payables tab to activate invoice-level or supplier-by-month analysis. The rest of treasury continues to work without it.</p></section>;
   const driverCell=selected.find((record)=>record.driverCell)?.driverCell;
-  return <section className="panel collections-panel"><div className="panel-head"><div><p className="eyebrow">Supplier-level payments</p><h2>Change one creditor without changing everyone else</h2><p>{accountSchedule?"Supplier-by-month schedule detected. Payment days can be changed directly.":"Invoice-level payable data detected. Model settlement timing and early-payment discounts by supplier."}</p></div><Select value={active} onValueChange={setSupplier}><SelectTrigger className="entity-select"><SelectValue/></SelectTrigger><SelectContent>{suppliers.map((name)=><SelectItem value={name} key={name}>{name}</SelectItem>)}</SelectContent></Select></div><div className="collections-grid"><aside className="collection-controls">{accountSchedule?<div><Label>Supplier DPO</Label><strong>{scenarioDpo} days · base {baseDpo}</strong><Slider min={0} max={180} step={1} value={[scenarioDpo]} onValueChange={([value])=>setSupplierDpo((current)=>({...current,[active]:value}))}/>{driverCell&&onWriteDriver&&<Button size="sm" onClick={()=>onWriteDriver(driverCell,scenarioDpo)} disabled={scenarioDpo===baseDpo}>Write supplier DPO</Button>}</div>:<div><Label>Payment timing</Label><strong>{delay>0?`${delay} month delay`:delay<0?`${Math.abs(delay)} month earlier`:"No timing change"}</strong><Slider min={-3} max={6} step={1} value={[delay]} onValueChange={([value])=>setDelay(value)}/></div>}<div><Label>Early payment discount</Label><div className="inline-input"><Input type="number" min="0" max="50" step=".25" value={discount} onChange={(e)=>setDiscount(Number(e.target.value)||0)}/><span>%</span></div></div><div><Label>Cost of lending / borrowing</Label><div className="inline-input"><Input type="number" min="0" max="60" step=".25" value={annualRate} onChange={(e)=>setAnnualRate(Number(e.target.value)||0)}/><span>% p.a.</span></div></div><div className="collection-kpis"><div><span>Selected payments</span><strong>{fmt(impact.amount)}</strong></div><div><span>Discount benefit</span><strong className="good">{fmt(impact.discountBenefit)}</strong></div><div><span>Funding cost</span><strong className="bad">{fmt(impact.financingCost)}</strong></div><div><span>Net benefit</span><strong className={impact.netBenefit>=0?"good":"bad"}>{fmt(impact.netBenefit)}</strong></div></div></aside><div><CollectionsChart periods={scan.periods} values={impact.impact} label="Supplier payment cash impact"/><div className="collection-summary"><span>{fmt(impact.movedEarlier)} paid earlier</span><span>{fmt(impact.movedLater)} delayed</span><span>{periodRecords.length} records in the selected period</span></div></div></div><div className="table-scroll model-table"><Table><TableHeader><TableRow><TableHead className="sticky-col">Supplier / invoice</TableHead><TableHead>Expected</TableHead><TableHead>Scenario</TableHead><TableHead className="number">Amount</TableHead><TableHead className="number">Probability</TableHead><TableHead>Write-back cell</TableHead></TableRow></TableHeader><TableBody>{periodRecords.slice(0,40).map((record)=><TableRow key={record.id}><TableCell className="sticky-col"><b>{record.supplier}</b><small>{record.invoice||record.sheet}</small></TableCell><TableCell>{record.expectedMonth||record.dueMonth}</TableCell><TableCell>{addMonths(record.expectedMonth||record.dueMonth,effectiveDelay)}</TableCell><TableCell className="number">{fmt(record.amount)}</TableCell><TableCell className="number">{record.probability===undefined?"Optional":`${(record.probability*100).toFixed(0)}%`}</TableCell><TableCell><small>{record.driverCell||record.dateCell||"Preview only"}{record.discountCell?` · ${record.discountCell}`:""}</small></TableCell></TableRow>)}</TableBody></Table></div><div className="top-customers"><strong>Largest detected suppliers</strong>{topSuppliers.map((item)=><button key={item.name} onClick={()=>setSupplier(item.name)} className={item.name===active?"on":""}><span>{item.name}</span><b>{fmt(item.amount)}</b></button>)}</div></section>;
+  return <section className="panel collections-panel">
+    <div className="panel-head"><div><p className="eyebrow">Supplier-level payments</p><h2>Change one creditor without changing everyone else</h2><p>{accountSchedule?"Supplier-by-month schedule detected. DPO changes use an AP roll-forward, with no whole-month rounding.":"Invoice-level payable data detected. Model settlement timing and early-payment discounts by supplier."}</p></div><Select value={active} onValueChange={setSupplier}><SelectTrigger className="entity-select"><SelectValue/></SelectTrigger><SelectContent>{suppliers.map((name)=><SelectItem value={name} key={name}>{name}</SelectItem>)}</SelectContent></Select></div>
+    <div className="collections-grid"><aside className="collection-controls">
+      {accountSchedule?<div><Label>Supplier DPO</Label><strong>{scenarioDpo} days · base {baseDpo}</strong><Slider min={0} max={180} step={1} value={[scenarioDpo]} onValueChange={([value])=>setSupplierDpo((current)=>({...current,[active]:value}))}/>{driverCell&&onWriteDriver&&<Button size="sm" onClick={()=>onWriteDriver(driverCell,scenarioDpo)} disabled={scenarioDpo===baseDpo}>Write supplier DPO</Button>}</div>:<div><Label>Payment timing</Label><strong>{delay>0?`${delay} month delay`:delay<0?`${Math.abs(delay)} month earlier`:"No timing change"}</strong><Slider min={-3} max={6} step={1} value={[delay]} onValueChange={([value])=>setDelay(value)}/></div>}
+      <div><Label>Early payment discount</Label><div className="inline-input"><Input type="number" min="0" max="50" step=".25" value={discount} onChange={(e)=>setDiscount(Number(e.target.value)||0)}/><span>%</span></div>{discount>0&&!discountEligible&&<small>Applied only when supplier payment timing is brought forward.</small>}</div>
+      <div><Label>Cost of lending / borrowing</Label><div className="inline-input"><Input type="number" min="0" max="60" step=".25" value={annualRate} onChange={(e)=>setAnnualRate(Number(e.target.value)||0)}/><span>% p.a.</span></div></div>
+      <div className="collection-kpis"><div><span>{accountSchedule?"End-period cash impact":"Selected payments"}</span><strong className={endCashImpact>=0?"good":"bad"}>{fmt(accountSchedule?endCashImpact:impact.amount)}</strong></div><div><span>Discount benefit</span><strong className="good">{fmt(impact.discountBenefit)}</strong></div><div><span>{impact.financingCost<0?"Funding benefit":"Funding cost"}</span><strong className={impact.financingCost<=0?"good":"bad"}>{fmt(Math.abs(impact.financingCost))}</strong></div><div><span>Net benefit</span><strong className={impact.netBenefit>=0?"good":"bad"}>{fmt(impact.netBenefit)}</strong></div></div>
+    </aside><div><CollectionsChart periods={scan.periods} values={impact.impact} label="Monthly supplier-payment cash impact versus base"/><div className="collection-summary"><span>{accountSchedule?`${fmt(endCashImpact)} cumulative cash impact at ${scan.periods[end]}`:`${fmt(impact.movedEarlier)} paid earlier`}</span><span>{accountSchedule?"No cash is dropped at the forecast boundary":`${fmt(impact.movedLater)} delayed`}</span><span>{periodRecords.length} records in the selected period</span></div></div></div>
+    <div className="table-scroll model-table"><Table><TableHeader><TableRow><TableHead className="sticky-col">{accountSchedule?"Month":"Supplier / invoice"}</TableHead><TableHead>{accountSchedule?"Base payment":"Expected"}</TableHead><TableHead>{accountSchedule?"Scenario payment":"Scenario"}</TableHead><TableHead className="number">{accountSchedule?"Cash impact":"Amount"}</TableHead><TableHead className="number">{accountSchedule?"Cumulative":"Probability"}</TableHead><TableHead>Write-back cell</TableHead></TableRow></TableHeader><TableBody>{accountSchedule&&rollForward?scan.periods.slice(start,end+1).map((period,offset)=>{const index=start+offset;return <TableRow key={period}><TableCell className="sticky-col"><b>{period}</b><small>{active}</small></TableCell><TableCell>{fmt(rollForward.baseCash[index])}</TableCell><TableCell>{fmt(rollForward.scenarioCash[index])}</TableCell><TableCell className="number">{fmt(rollForward.cashImpact[index])}</TableCell><TableCell className="number">{fmt(rollForward.cumulativeImpact[index])}</TableCell><TableCell><small>{driverCell||"Preview only"}</small></TableCell></TableRow>}):periodRecords.slice(0,40).map((record)=><TableRow key={record.id}><TableCell className="sticky-col"><b>{record.supplier}</b><small>{record.invoice||record.sheet}</small></TableCell><TableCell>{record.expectedMonth||record.dueMonth}</TableCell><TableCell>{addMonths(record.expectedMonth||record.dueMonth,effectiveDelay)}</TableCell><TableCell className="number">{fmt(record.amount)}</TableCell><TableCell className="number">{record.probability===undefined?"Optional":`${(record.probability*100).toFixed(0)}%`}</TableCell><TableCell><small>{record.driverCell||record.dateCell||"Preview only"}{record.discountCell?` · ${record.discountCell}`:""}</small></TableCell></TableRow>)}</TableBody></Table></div>
+    <div className="top-customers"><strong>Largest detected suppliers</strong>{topSuppliers.map((item)=><button key={item.name} onClick={()=>setSupplier(item.name)} className={item.name===active?"on":""}><span>{item.name}</span><b>{fmt(item.amount)}</b></button>)}</div>
+  </section>;
 }
 
 export function WorkingCapitalModule({ scan, entity, setEntity, end }: { scan: ScanResult; entity:string; setEntity:(v:string)=>void; end:number }) {
@@ -158,10 +242,32 @@ export function DebtModule({ scan, start, end }: { scan: ScanResult; start:numbe
   const instrumentRows=sections.flatMap((section)=>rows.filter((row)=>row.section===section)),usedRows=instrumentRows.length?instrumentRows:rows;
   const matches=(pattern:RegExp)=>usedRows.filter((row)=>pattern.test(row.label));
   const balances=matches(/closing balance|closing drawn|closing debt|debt outstanding|outstanding principal/i),draws=matches(/drawdown|facility draw|new borrowing|loan proceeds|debt proceeds/i),repayments=matches(/principal repayment|loan repayment|debt repayment|^repayment$|amorti[sz]ation/i),interest=matches(/^(?!.*rate).*interest|cash interest|interest paid|interest expense|commitment fee/i);
+  // The direct cash-flow statement is the authoritative source for cash
+  // interest when available. This also protects the dashboard from a debt
+  // schedule row that is accidentally linked to principal instead of interest.
+  const directInterest=sourceRows(scan,"cashFlow").filter((row)=>/interest(?!.*rate)|commitment fee/i.test(row.label)&&!/subtotal|total debt service/i.test(row.label));
+  const effectiveInterest=directInterest.length?directInterest:interest;
+  const interestForSection=(section:string,block:ScanRow[])=>{
+    const instrument=/revolver|revolving|facility/i.test(section)?/revolver|revolving|facility/i:/term loan|loan/i;
+    const direct=directInterest.filter((row)=>instrument.test(`${row.label} ${row.section}`));
+    return direct.length?direct:block.filter((row)=>/^(?!.*rate).*interest|cash interest|interest paid|interest expense|commitment fee/i.test(row.label));
+  };
   const periodAmount=(matched:ScanRow[])=>matched.reduce((sum,row)=>sum+Math.abs(total(row.values,start,end)),0),at=(matched:ScanRow[],index:number)=>matched.reduce((sum,row)=>sum+Math.abs(row.values[index]||0),0);
-  const summary=[["Closing debt",at(balances,end),"Balance at period end"],["Drawdowns",periodAmount(draws),"New funding in selected period"],["Principal repaid",periodAmount(repayments),"Debt reduction in selected period"],["Interest & fees",periodAmount(interest),"Cash cost in selected period"]] as [string,number,string][];
-  const timelineRows=[{label:"Drawdowns",rows:draws,className:"good"},{label:"Principal repayments",rows:repayments,className:"bad"},{label:"Interest & fees",rows:interest,className:"bad"},{label:"Closing debt",rows:balances,className:""}];
-  return <section className="panel table-panel debt-panel"><div className="panel-head"><div><p className="eyebrow">Debt portfolio</p><h2>{sections.length||1} {(sections.length||1)===1?"instrument":"instruments"} · complete selected-period view</h2><p>Drawdowns are separated from repayments and interest so the cash impact is easy to trace.</p></div></div><div className="debt-summary">{summary.map(([label,value,help])=><div key={label}><span>{label}</span><strong>{fmt(value)}</strong><small>{help}</small></div>)}</div><div className="debt-grid">{(sections.length?sections:["Debt schedule"]).map((section)=>{const block=sections.length?rows.filter((r)=>r.section===section):rows,balance=findRow(block,["closing balance"])||findRow(block,["closing drawn"])||findRow(block,["outstanding"]),sectionInterest=block.filter((r)=>/^(?!.*rate).*interest|cash interest|interest paid|interest expense|commitment fee/i.test(r.label)),principal=block.filter((r)=>/principal repayment|loan repayment|debt repayment|^repayment$|amorti[sz]ation/i.test(r.label)),draw=block.filter((r)=>/drawdown|facility draw|new borrowing|loan proceeds/i.test(r.label));return <article key={section}><span>{section.replace(/^[①②③④⑤⑥]\s*/,"")}</span><strong>{balance?fmt(balance.values[end]??0):"—"}</strong><small>Closing balance · {block[0]?.currency||"model currency"}</small><dl><dt>Drawdowns</dt><dd className="good">{fmt(periodAmount(draw))}</dd><dt>Principal</dt><dd>{fmt(periodAmount(principal))}</dd><dt>Interest & fees</dt><dd>{fmt(periodAmount(sectionInterest))}</dd></dl></article>})}</div><div className="debt-timeline"><h3>Monthly debt schedule</h3><div className="table-scroll model-table"><Table><TableHeader><TableRow><TableHead className="sticky-col">Movement</TableHead>{scan.periods.slice(start,end+1).map((period)=><TableHead className="number" key={period}>{period}</TableHead>)}</TableRow></TableHeader><TableBody>{timelineRows.map((item)=><TableRow key={item.label}><TableCell className="sticky-col"><b>{item.label}</b></TableCell>{scan.periods.slice(start,end+1).map((period,offset)=><TableCell className={`number ${item.className}`} key={period}>{fmt(at(item.rows,start+offset))}</TableCell>)}</TableRow>)}</TableBody></Table></div></div></section>;
+  const summary=[["Closing debt",at(balances,end),"Balance at period end"],["Drawdowns",periodAmount(draws),"New funding in selected period"],["Principal repaid",periodAmount(repayments),"Debt reduction in selected period"],["Interest & fees",periodAmount(effectiveInterest),"Cash cost in selected period"]] as [string,number,string][];
+  const timelineRows=[{label:"Drawdowns",rows:draws,className:"good"},{label:"Principal repayments",rows:repayments,className:"bad"},{label:"Interest & fees",rows:effectiveInterest,className:"bad"},{label:"Closing debt",rows:balances,className:""}];
+  return <section className="panel table-panel debt-panel">
+    <div className="panel-head"><div><p className="eyebrow">Debt portfolio</p><h2>{sections.length||1} {(sections.length||1)===1?"instrument":"instruments"} · complete selected-period view</h2><p>Drawdowns are separated from repayments and interest so the cash impact is easy to trace.</p></div></div>
+    <div className="debt-summary">{summary.map(([label,value,help])=><div key={label}><span>{label}</span><strong>{fmt(value)}</strong><small>{help}</small></div>)}</div>
+    <div className="debt-grid">{(sections.length?sections:["Debt schedule"]).map((section)=>{
+      const block=sections.length?rows.filter((r)=>r.section===section):rows;
+      const balance=findRow(block,["closing balance"])||findRow(block,["closing drawn"])||findRow(block,["outstanding"]);
+      const sectionInterest=interestForSection(section,block);
+      const principal=block.filter((r)=>/principal repayment|loan repayment|debt repayment|^repayment$|amorti[sz]ation/i.test(r.label));
+      const draw=block.filter((r)=>/drawdown|facility draw|new borrowing|loan proceeds/i.test(r.label));
+      return <article key={section}><span>{section.replace(/^[①②③④⑤⑥]\s*/,"")}</span><strong>{balance?fmt(balance.values[end]??0):"—"}</strong><small>Closing balance · {block[0]?.currency||"model currency"}</small><dl><dt>Drawdowns</dt><dd className="good">{fmt(periodAmount(draw))}</dd><dt>Principal</dt><dd>{fmt(periodAmount(principal))}</dd><dt>Interest & fees</dt><dd>{fmt(periodAmount(sectionInterest))}</dd></dl></article>;
+    })}</div>
+    <div className="debt-timeline"><h3>Monthly debt schedule</h3><div className="table-scroll model-table"><Table><TableHeader><TableRow><TableHead className="sticky-col">Movement</TableHead>{scan.periods.slice(start,end+1).map((period)=><TableHead className="number" key={period}>{period}</TableHead>)}</TableRow></TableHeader><TableBody>{timelineRows.map((item)=><TableRow key={item.label}><TableCell className="sticky-col"><b>{item.label}</b></TableCell>{scan.periods.slice(start,end+1).map((period,offset)=><TableCell className={`number ${item.className}`} key={period}>{fmt(at(item.rows,start+offset))}</TableCell>)}</TableRow>)}</TableBody></Table></div></div>
+  </section>;
 }
 
 export function LiquidityModule({ scan, end }: { scan: ScanResult; end:number }) {
