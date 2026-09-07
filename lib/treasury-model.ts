@@ -183,8 +183,10 @@ export function directDaysScheduleImpact({ baseCash, activity, baseDays, scenari
   const length=Math.max(baseCash.length,activity?.length||0),safeBaseDays=Math.max(0,Number.isFinite(baseDays)?baseDays:0),safeScenarioDays=Math.max(0,Number.isFinite(scenarioDays)?scenarioDays:safeBaseDays),discount=Math.max(0,Math.min(1,Number.isFinite(discountPct)?discountPct:0));
   const base=Array.from({length},(_,index)=>Number.isFinite(baseCash[index])?Math.abs(baseCash[index]):0);
   const grossSettlement=base.map((value,index)=>safeBaseDays>0?value*safeScenarioDays/safeBaseDays:Math.abs(activity?.[index]||0)*safeScenarioDays/30.4);
-  const scenarioCash=grossSettlement.map((value)=>value*(1-discount));
-  const cashImpact=scenarioCash.map((value,index)=>value-base[index]);
+  // These rows represent the receivable balance driven by DSO. A larger
+  // balance means more cash is tied up, so cash impact is the inverse change.
+  const scenarioCash=[...grossSettlement];
+  const cashImpact=grossSettlement.map((value,index)=>base[index]-value-value*discount);
   let running=0;const cumulativeImpact=cashImpact.map((value)=>(running+=value));
   return {baseCash:base,grossSettlement,scenarioCash,cashImpact,cumulativeImpact,scenarioClosing:[]};
 }
