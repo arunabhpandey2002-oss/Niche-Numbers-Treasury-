@@ -15,6 +15,7 @@ type Props = {
   levers: ScenarioLever[];
   connected: boolean;
   compute: (vals: Record<string, number>) => { out: AssistantOutputs; series: number[] };
+  onVerify?: (vals: Record<string,number>) => Promise<{out:AssistantOutputs;series:number[]}|null>;
   money: (n: number) => string;
 };
 
@@ -82,22 +83,31 @@ function CompareChart({ series, names, periods, money, connected }: { series: nu
   );
 }
 
-export function ScenarioLab({ periods, levers, connected, compute, money }: Props) {
+export function ScenarioLab({ periods, levers, connected, compute, onVerify, money }: Props) {
   const [scenarios, setScenarios] = useState<Scenario[]>([{ id: "base", name: "Base", vals: {} }]);
   const [selectedKpis,setSelectedKpis]=useState<Array<keyof AssistantOutputs>>(DEFAULT_KPIS);
   const [showKpiSettings,setShowKpiSettings]=useState(false);
+  const [verified,setVerified]=useState<Record<string,{out:AssistantOutputs;series:number[]}>>({});
+  const [pendingVerify,setPendingVerify]=useState<string|null>(null),[verifying,setVerifying]=useState<string|null>(null);
 
-  const results = useMemo(() => scenarios.map((scenario) => compute(effectiveVals(scenario, levers))), [scenarios, levers, compute]);
+  const computedResults = useMemo(() => scenarios.map((scenario) => compute(effectiveVals(scenario, levers))), [scenarios, levers, compute]);
+  const results = scenarios.map((scenario,index)=>verified[scenario.id]||computedResults[index]);
 
   function addScenario() {
     if (scenarios.length >= 5) return;
     const source = scenarios[scenarios.length - 1];
-    setScenarios((current) => [...current, { id: `s_${Date.now()}`, name: `Scenario ${current.length}`, vals: { ...source.vals } }]);
+    setScenarios((current) => [...current, { id: `s_${Date.now()}`, name: `Scenario ${current.length}`, vals: { ...effectiveVals(source,levers) } }]);
   }
-  function removeScenario(id: string) { setScenarios((current) => current.filter((scenario) => scenario.id !== id)); }
+  function removeScenario(id: string) { setScenarios((current) => current.filter((scenario) => scenario.id !== id));setVerified((current)=>{const next={...current};delete next[id];return next}); }
   function rename(id: string, name: string) { setScenarios((current) => current.map((scenario) => scenario.id === id ? { ...scenario, name } : scenario)); }
   function setVal(id: string, leverId: string, value: number) {
     setScenarios((current) => current.map((scenario) => scenario.id === id ? { ...scenario, vals: { ...scenario.vals, [leverId]: value } } : scenario));
+    setVerified((current)=>{const next={...current};delete next[id];return next});
+  }
+
+  async function verifyScenario(scenario:Scenario){
+    if(!onVerify||verifying)return;setVerifying(scenario.id);
+    try{const result=await onVerify(effectiveVals(scenario,levers));if(result)setVerified((current)=>({...current,[scenario.id]:result}));setPendingVerify(null)}finally{setVerifying(null)}
   }
 
   // Only show levers that someone can meaningfully move (finite range).
@@ -139,6 +149,7 @@ export function ScenarioLab({ periods, levers, connected, compute, money }: Prop
                     ? <b>{scenario.name}</b>
                     : <input className="sc-name" value={scenario.name} onChange={(event) => rename(scenario.id, event.target.value)} aria-label="Scenario name" />}
                   {scenario.id !== "base" && <button className="sc-del" onClick={() => removeScenario(scenario.id)} aria-label={`Remove ${scenario.name}`}><Trash2 size={13} /></button>}
+                  {connected&&scenario.id!=="base"&&<div className="sc-verify">{pendingVerify===scenario.id?<><button onClick={()=>verifyScenario(scenario)} disabled={!!verifying}>{verifying===scenario.id?"Writing…":"Confirm write-back"}</button><button onClick={()=>setPendingVerify(null)} disabled={!!verifying}>Cancel</button></>:<button onClick={()=>setPendingVerify(scenario.id)}>{verified[scenario.id]?"Verify again":"Verify in Sheets"}</button>}</div>}
                 </th>
               ))}
             </tr>
