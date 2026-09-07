@@ -53,10 +53,22 @@ function CompareChart({ series, names, periods, money, connected }: { series: nu
   const all = chartSeries.flat().filter((value): value is number => value !== null);
   if (!all.length) return <div className="sc-chart-empty">Connect and scan a model to see the cash paths.</div>;
   const lo = Math.min(0, ...all), hi = Math.max(...all), span = hi - lo || 1;
-  const W = 820, H = 270, padL = 54, padR = 125, top = 22, bottom = 220;
+  const W = 860, H = 270, padL = 54, padR = 170, top = 22, bottom = 220;
   const n = Math.max(1, pointCount - 1);
   const x = (i: number) => padL + (i / n) * (W - padL - padR);
   const y = (v: number) => bottom - ((v - lo) / span) * (bottom - top);
+  // Lay out endpoint labels together so close or identical results never overlap.
+  const endLabels=chartSeries.flatMap((values,seriesIndex)=>{
+    const pointIndex=values.findLastIndex((value)=>value!==null),value=pointIndex>=0?values[pointIndex]:null;
+    return value===null?[]:[{seriesIndex,pointIndex,value,pointY:y(value),labelY:y(value)}];
+  }).sort((a,b)=>a.pointY-b.pointY);
+  const labelGap=16,labelTop=top+5,labelBottom=bottom-5;
+  endLabels.forEach((label,index)=>{label.labelY=Math.max(labelTop,label.pointY,index?endLabels[index-1].labelY+labelGap:labelTop)});
+  for(let index=endLabels.length-1;index>=0;index--){
+    const ceiling=index===endLabels.length-1?labelBottom:endLabels[index+1].labelY-labelGap;
+    endLabels[index].labelY=Math.min(endLabels[index].labelY,ceiling);
+  }
+  const endLabelBySeries=new Map(endLabels.map((label)=>[label.seriesIndex,label]));
   return (
     <div className="sc-chart">
       <svg viewBox={`0 0 ${W} ${H}`} role="img" aria-label="Closing cash by scenario over time">
@@ -67,9 +79,9 @@ function CompareChart({ series, names, periods, money, connected }: { series: nu
             points={s.flatMap((v, i) => v === null ? [] : [`${x(i)},${y(v)}`]).join(" ")} />
         ))}
         {chartSeries.map((s, si) => s.map((value,index)=>value===null?null:<circle key={`${si}-${index}`} cx={x(index)} cy={y(value)} r="3" fill={COLORS[si % COLORS.length]}><title>{`${names[si]} · ${periods[index]||`Period ${index+1}`} · ${money(value)}`}</title></circle>))}
-        {chartSeries.map((s, si) => { const index=s.findLastIndex((value)=>value!==null),value=index>=0?s[index]:null;return value !== null ? (
-          <g key={si}><line x1={x(index)+4} y1={y(value)} x2={x(index)+10} y2={y(value)} stroke={COLORS[si % COLORS.length]}/><text x={x(index)+13} y={y(value)+4+si*11} className="sc-data-label" fill={COLORS[si % COLORS.length]}>{names[si]}: {money(value)}</text></g>
-        ) : null })}
+        {chartSeries.map((_s,si)=>{const label=endLabelBySeries.get(si);return label?(
+          <g key={si}><path d={`M ${x(label.pointIndex)+4} ${label.pointY} L ${x(label.pointIndex)+11} ${label.pointY} L ${x(label.pointIndex)+17} ${label.labelY}`} className="sc-label-leader" stroke={COLORS[si % COLORS.length]}/><text x={x(label.pointIndex)+21} y={label.labelY+4} className="sc-data-label" fill={COLORS[si % COLORS.length]}>{names[si]}: {money(label.value)}</text></g>
+        ):null})}
         <text x={padL} y="244" className="sc-axis">{periods[0] || "Start"}</text>
         <text x={W - padR} y="244" textAnchor="end" className="sc-axis">{periods[periods.length - 1] || "End"}</text>
       </svg>
