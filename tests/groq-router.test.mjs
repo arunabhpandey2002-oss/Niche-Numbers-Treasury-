@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { routeQuestion, clarificationFor, addClarification } from "../lib/groq-assistant.ts";
+import { routeQuestion, clarificationFor, addClarification, resolveScenarioChanges } from "../lib/groq-assistant.ts";
 
 test("detects topics from varied plain-language phrasing", () => {
   assert.deepEqual(routeQuestion("can we get our customers to pay faster?").topics, ["dso"]);
@@ -38,6 +38,18 @@ test("parses magnitude in to / by / percent forms", () => {
   assert.deepEqual(routeQuestion("grow revenue by 20%").slots.magnitude, { mode: "by", value: 20, unit: "percent" });
   assert.deepEqual(routeQuestion("extend runway to 12 months").slots.magnitude, { mode: "to", value: 12, unit: "months" });
   assert.equal(routeQuestion("what is my runway?").slots.magnitude, null);
+  assert.deepEqual(routeQuestion("pay my suppliers 10 days faster").slots.magnitude, { mode: "by", value: 10, unit: "days" });
+});
+
+test("resolves relative day changes from engine state instead of trusting the LLM arithmetic", () => {
+  const route = routeQuestion("what happens to closing cash if I pay suppliers 10 days faster?");
+  const state = {
+    available_levers: [{ id:"dpo", name:"DPO", value:45, base:45, min:0, max:180, step:1, unit:"days", kind:"working_capital", mapped:true, business_effect:"" }],
+    inputs:{built_in_drivers:{dso:30,dpo:45,dio:20}}, computed_outputs:{}, model:{}, period:{},
+  };
+  const resolved = resolveScenarioChanges([{lever_id:"dpo",new_value:10,reason:"LLM guess"}],route,state);
+  assert.equal(resolved[0].lever_id,"dpo");
+  assert.equal(resolved[0].new_value,35);
 });
 
 test("reports missing slots so the clarifying step knows what to ask", () => {
