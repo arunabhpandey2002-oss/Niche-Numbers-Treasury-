@@ -78,12 +78,14 @@ function CompareChart({ series, names, periods, money, connected }: { series: nu
           <span key={i}><i style={{ background: COLORS[i % COLORS.length] }} />{name} · <b>{lastValue==null?"Verify via write-back":money(lastValue)}</b></span>
         )})}
       </div>
-      {connected&&<p className="sc-chart-note"><b>Workbook-safe comparison.</b> The base path is read from Google Sheets. Changed scenarios show operational outputs such as the cash-conversion cycle, but cash, runway and operating results remain unverified until you use the chat&rsquo;s confirmed write-back flow.</p>}
+      {connected&&<p className="sc-chart-note"><b>Workbook-safe comparison.</b> Base stays frozen at the model state loaded when this comparison opened. Each confirmed scenario is plotted from the recalculated Google Sheets values and remains available beside the other scenarios.</p>}
     </div>
   );
 }
 
 export function ScenarioLab({ periods, levers, connected, compute, onVerify, money }: Props) {
+  const [frozenLeverValues] = useState<Record<string,number>>(()=>Object.fromEntries(levers.map((lever)=>[lever.id,lever.base])));
+  const [frozenBase] = useState<{out:AssistantOutputs;series:number[]}>(()=>compute(Object.fromEntries(levers.map((lever)=>[lever.id,lever.base]))));
   const [scenarios, setScenarios] = useState<Scenario[]>([{ id: "base", name: "Base", vals: {} }]);
   const [selectedKpis,setSelectedKpis]=useState<Array<keyof AssistantOutputs>>(DEFAULT_KPIS);
   const [showKpiSettings,setShowKpiSettings]=useState(false);
@@ -91,12 +93,12 @@ export function ScenarioLab({ periods, levers, connected, compute, onVerify, mon
   const [pendingVerify,setPendingVerify]=useState<string|null>(null),[verifying,setVerifying]=useState<string|null>(null);
 
   const computedResults = useMemo(() => scenarios.map((scenario) => compute(effectiveVals(scenario, levers))), [scenarios, levers, compute]);
-  const results = scenarios.map((scenario,index)=>verified[scenario.id]||computedResults[index]);
+  const results = scenarios.map((scenario,index)=>scenario.id==="base"?frozenBase:verified[scenario.id]||computedResults[index]);
 
   function addScenario() {
     if (scenarios.length >= 5) return;
-    const source = scenarios[scenarios.length - 1];
-    setScenarios((current) => [...current, { id: `s_${Date.now()}`, name: `Scenario ${current.length}`, vals: { ...effectiveVals(source,levers) } }]);
+    const source = scenarios[scenarios.length - 1],sourceValues=source.id==="base"?frozenLeverValues:effectiveVals(source,levers);
+    setScenarios((current) => [...current, { id: `s_${Date.now()}`, name: `Scenario ${current.length}`, vals: { ...sourceValues } }]);
   }
   function removeScenario(id: string) { setScenarios((current) => current.filter((scenario) => scenario.id !== id));setVerified((current)=>{const next={...current};delete next[id];return next}); }
   function rename(id: string, name: string) { setScenarios((current) => current.map((scenario) => scenario.id === id ? { ...scenario, name } : scenario)); }
@@ -107,7 +109,7 @@ export function ScenarioLab({ periods, levers, connected, compute, onVerify, mon
 
   async function verifyScenario(scenario:Scenario){
     if(!onVerify||verifying)return;setVerifying(scenario.id);
-    try{const result=await onVerify(effectiveVals(scenario,levers));if(result)setVerified((current)=>({...current,[scenario.id]:result}));setPendingVerify(null)}finally{setVerifying(null)}
+    try{const result=await onVerify(effectiveVals(scenario,levers));if(result){const baseCash=frozenBase.out.closing_cash,scenarioCash=result.out.closing_cash,verifiedResult={...result,out:{...result.out,total_cash_impact:baseCash!==null&&scenarioCash!==null?scenarioCash-baseCash:0}};setVerified((current)=>({...current,[scenario.id]:verifiedResult}))}setPendingVerify(null)}finally{setVerifying(null)}
   }
 
   // Only show levers that someone can meaningfully move (finite range).
@@ -160,12 +162,12 @@ export function ScenarioLab({ periods, levers, connected, compute, onVerify, mon
               <tr key={lever.id}>
                 <td className="sc-rowhead"><b>{lever.name}</b><small>{lever.unit}</small></td>
                 {scenarios.map((scenario) => {
-                  const value = cleanLeverValue(scenario.vals[lever.id] ?? lever.base,lever.step);
-                  const changed = value !== lever.base;
+                  const baseValue=frozenLeverValues[lever.id]??lever.base,value = cleanLeverValue(scenario.id==="base"?baseValue:(scenario.vals[lever.id]??baseValue),lever.step);
+                  const changed = value !== baseValue;
                   return (
                     <td key={scenario.id}>
                       {scenario.id === "base"
-                        ? <span className="sc-base-val">{cleanLeverValue(lever.base,lever.step)}</span>
+                        ? <span className="sc-base-val">{cleanLeverValue(baseValue,lever.step)}</span>
                         : <Input className={`sc-input ${changed ? "changed" : ""}`} type="number" step={lever.step} value={value}
                             onChange={(event) => setVal(scenario.id, lever.id, cleanLeverValue(Number(event.target.value),lever.step))} aria-label={`${lever.name} in ${scenario.name}`} />}
                     </td>
@@ -176,7 +178,7 @@ export function ScenarioLab({ periods, levers, connected, compute, onVerify, mon
             <tr className="sc-section-row"><td colSpan={scenarios.length + 1}>Results {connected ? "" : "(demo)"}</td></tr>
             {kpis.map((kpi) => (
               <tr key={kpi.key as string} className="sc-kpi-row">
-                <td className="sc-rowhead"><b>{connected&&["closing_cash","runway_months","operating_cash_flow","net_cash_movement"].includes(kpi.key)?`Estimated ${kpi.label.toLowerCase()}`:kpi.label}</b></td>
+                <td className="sc-rowhead"><b>{connected&&["closing_cash","runway_months","operating_cash_flow","net_cash_movement"].includes(kpi.key)&&scenarios.some((scenario)=>scenario.id!=="base"&&!verified[scenario.id])?`Estimated ${kpi.label.toLowerCase()}`:kpi.label}</b></td>
                 {results.map((result, i) => (
                   <td key={i} className={bestByKpi[kpi.key as string] === i && scenarios.length > 1 ? "sc-best" : ""}>
                     {kpi.fmt(result.out[kpi.key] as number | null, money)}
@@ -188,7 +190,7 @@ export function ScenarioLab({ periods, levers, connected, compute, onVerify, mon
         </table>
       </div>
 
-      <div className="sc-chart-head"><p className="eyebrow">{connected?"Estimated closing cash over time":"Closing cash over time"}</p><span>{connected ? "Directional comparison — verify through write-back" : "Demo data."}</span></div>
+      <div className="sc-chart-head"><p className="eyebrow">Closing cash over time</p><span>{connected ? "Confirmed scenarios use recalculated Sheets data" : "Demo data."}</span></div>
       <CompareChart series={results.map((result) => result.series)} names={scenarios.map((scenario) => scenario.name)} periods={periods} money={money} connected={connected}/>
     </section>
   );
