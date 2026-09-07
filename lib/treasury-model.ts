@@ -128,6 +128,53 @@ export function roundDays(value: number) {
   return Number.isFinite(value) ? Math.round(value) : 0;
 }
 
+export type WorkingCapitalScheduleImpact = {
+  baseCash: number[];
+  grossSettlement: number[];
+  scenarioCash: number[];
+  cashImpact: number[];
+  cumulativeImpact: number[];
+  scenarioClosing: number[];
+};
+
+/** Preview an account-level DSO/DPO change without inventing a terminal-month
+ * settlement. The changed balance remains in AR/AP at the forecast boundary. */
+export function workingCapitalScheduleImpact({ baseCash, activity, baseClosing, baseDays, scenarioDays, kind, discountPct = 0 }: {
+  baseCash: number[]; activity: number[]; baseClosing?: number[]; baseDays: number; scenarioDays: number;
+  kind: "collections" | "payments"; discountPct?: number;
+}): WorkingCapitalScheduleImpact {
+  const length = Math.max(baseCash.length, activity.length, baseClosing?.length || 0);
+  const finite = (value: number | undefined) => Number.isFinite(value) ? Math.abs(value as number) : 0;
+  const base = Array.from({ length }, (_, index) => finite(baseCash[index]));
+  const activityValues = Array.from({ length }, (_, index) => finite(activity[index]));
+  const safeBaseDays = Math.max(0, Number.isFinite(baseDays) ? baseDays : 0);
+  const safeScenarioDays = Math.max(0, Number.isFinite(scenarioDays) ? scenarioDays : safeBaseDays);
+  const discount = Math.max(0, Math.min(1, Number.isFinite(discountPct) ? discountPct : 0));
+  const baseBalance = Array.from({ length }, (_, index) => {
+    const supplied = baseClosing?.[index];
+    return Number.isFinite(supplied) ? Math.abs(supplied as number) : activityValues[index] * safeBaseDays / 30.4;
+  });
+  const targetClosing = baseBalance.map((balance, index) => safeBaseDays > 0
+    ? balance * safeScenarioDays / safeBaseDays
+    : activityValues[index] * safeScenarioDays / 30.4);
+  const grossSettlement: number[] = [], scenarioClosing: number[] = [];
+  let previousDelta = 0;
+  base.forEach((value, index) => {
+    const targetDelta = targetClosing[index] - baseBalance[index];
+    const settlement = Math.max(0, value + previousDelta - targetDelta);
+    grossSettlement[index] = settlement;
+    // If the target would require a negative receipt/payment, carry the
+    // unrealised balance forward rather than creating impossible cash.
+    previousDelta = previousDelta + value - settlement;
+    scenarioClosing[index] = Math.max(0, baseBalance[index] + previousDelta);
+  });
+  const scenarioCash = grossSettlement.map((value) => value * (1 - discount));
+  const cashImpact = scenarioCash.map((value, index) => kind === "collections" ? value - base[index] : base[index] - value);
+  let running = 0;
+  const cumulativeImpact = cashImpact.map((value) => (running += value));
+  return { baseCash: base, grossSettlement, scenarioCash, cashImpact, cumulativeImpact, scenarioClosing };
+}
+
 export function scenarioCashPath(
   baseCash: number[],
   billings: number[],
