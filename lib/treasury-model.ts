@@ -187,7 +187,9 @@ export function directDaysScheduleImpact({ baseCash, activity, baseDays, scenari
   // balance means more cash is tied up, so cash impact is the inverse change.
   const scenarioCash=[...grossSettlement];
   const cashImpact=grossSettlement.map((value,index)=>base[index]-value-value*discount);
-  let running=0;const cumulativeImpact=cashImpact.map((value)=>(running+=value));
+  // Each value is already the cash tied up at that month-end (a stock), not a
+  // separate flow. Do not sum consecutive closing-balance differences.
+  const cumulativeImpact=[...cashImpact];
   return {baseCash:base,grossSettlement,scenarioCash,cashImpact,cumulativeImpact,scenarioClosing:[]};
 }
 
