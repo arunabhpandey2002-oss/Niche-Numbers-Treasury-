@@ -11,7 +11,7 @@ import { Slider } from "@/components/ui/slider";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { CashFlowModule, CovenantsModule, Coverage, CustomerCollectionsModule, DebtModule, DetectedScheduleModule, LiquidityModule, SupplierPaymentsModule, WorkingCapitalModule } from "@/components/treasury-module-views";
-import { SCAN_SCHEMA_VERSION, ScanResult, allEntities, cashBalanceCandidateRows, cashCandidateRows, defaultCashRoles, driverRows, parseWorkbook, scenarioCashPath, selectCashBalanceRow, type CashRole, type CustomCashLine, type ScanRow } from "@/lib/treasury-model";
+import { SCAN_SCHEMA_VERSION, ScanResult, allEntities, cashBalanceCandidateRows, cashCandidateRows, defaultCashRoles, driverRows, parseWorkbook, paymentsForScan, selectCashBalanceRow, workingCapitalScheduleImpact, type CashRole, type CollectionRecord, type CustomCashLine, type PaymentRecord, type ScanRow } from "@/lib/treasury-model";
 import { ModelMappingWorkbench } from "@/components/model-mapping-workbench";
 import { MappingFallback } from "@/components/mapping-fallback";
 import { CashFlowEditor } from "@/components/cash-flow-editor";
@@ -95,7 +95,16 @@ function preferredSeries(scan: ScanResult, entity: string, patterns: RegExp[]) {
   return candidates.find((row)=>row.entity===entity)||candidates.find((row)=>row.entity==="Consolidated")||candidates.find((row)=>row.entity==="Group")||candidates[0];
 }
 function modelSnapshot(scan: ScanResult | null, entity: string, index: number): ModelSnapshot {
-  const cash = scanMetric(scan,entity,index,/consolidated ending cash|ending cash|closing cash/i);
+  const cashRows = scan ? scan.rows.filter((row) => {
+    const source = scan.sourceAssignments.cashFlow;
+    const rightSheet = !source || source === "__auto__" || source === "__skip__" || row.sheet === source;
+    return rightSheet && (row.entity === entity || row.entity === "Consolidated" || row.entity === "Group");
+  }) : [];
+  // Use the same scored cash-row selector as the direct-method waterfall. A
+  // loose first regex match can pick a pre-financing checkpoint instead.
+  const cashRow = selectCashBalanceRow(cashRows,"closing") || selectCashBalanceRow(scan?.rows || [],"closing");
+  const cashValue = cashRow?.values[index];
+  const cash = Number.isFinite(cashValue) ? Number(cashValue) : null;
   const movement = scanMetric(scan,entity,index,/net change|net cash movement|change in cash/i);
   const recent = scan ? Array.from({length:3},(_,offset)=>scanMetric(scan,entity,Math.max(0,index-offset),/net change|net cash movement|change in cash/i)).filter((v):v is number=>v!==null&&v<0) : [];
   const burn = recent.length ? Math.abs(recent.reduce((a,b)=>a+b,0)/recent.length) : 0;
@@ -122,6 +131,34 @@ function portfolioDriverWrites(scan: ScanResult | null, key: DriverKey, delta: n
   const unique = new Map<string, number>();
   records.forEach((record) => { if (record.driverCell && record.driverValue !== undefined) unique.set(record.driverCell, record.driverValue); });
   return [...unique.entries()].map(([range, value]) => ({ range, values: [[Math.max(0, value + delta)]] }));
+}
+
+function portfolioScheduleImpact(scan: ScanResult, key: "dso"|"dpo", delta: number, index: number, targetUnit: string) {
+  const records: Array<CollectionRecord|PaymentRecord> = key === "dso" ? scan.collections : paymentsForScan(scan);
+  const accountName = (record: CollectionRecord|PaymentRecord) => key === "dso" ? "customer" in record ? record.customer : "" : "supplier" in record ? record.supplier : "";
+  const groups = new Map<string, Array<CollectionRecord|PaymentRecord>>();
+  records.filter((record)=>record.sourceKind==="account_schedule").forEach((record)=>{
+    const name=accountName(record),groupKey=`${record.sheet}\u0000${name}`;
+    const group=groups.get(groupKey)||[];group.push(record);groups.set(groupKey,group);
+  });
+  if(!groups.size)return null;
+  const normalized=(value:string)=>value.toLowerCase().replace(/[^a-z0-9]/g,"");
+  let impact=0,used=0;
+  groups.forEach((group)=>{
+    const first=group[0],name=accountName(first),baseDays=first.driverValue;
+    if(!name||!Number.isFinite(baseDays))return;
+    const baseCash=Array(scan.periods.length).fill(0) as number[];
+    group.forEach((record)=>{const period=record.expectedMonth||record.dueMonth,i=scan.periods.indexOf(period);if(i>=0)baseCash[i]+=Math.abs(record.amount)*(record.probability??1)});
+    const rows=scan.rows.filter((row)=>row.sheet===first.sheet&&normalized(row.label)===normalized(name));
+    const activityPattern=key==="dso"?/billings|sales|revenue|invoices? raised|credit sales/i:/purchases|procurement|cost of goods|cogs|supplier invoices?|materials/i;
+    const closingPattern=key==="dso"?/closing receivables?|closing ar|accounts receivable/i:/closing payables?|closing ap|accounts payable/i;
+    const activity=rows.find((row)=>activityPattern.test(`${row.section} ${row.label}`))?.values.map(Math.abs)||baseCash;
+    const baseClosing=rows.find((row)=>closingPattern.test(`${row.section} ${row.label}`))?.values.map(Math.abs);
+    const result=workingCapitalScheduleImpact({baseCash,activity,baseClosing,baseDays:Number(baseDays),scenarioDays:Math.max(0,Number(baseDays)+delta),kind:key==="dso"?"collections":"payments"});
+    const factor=unitScale(first.unit)/unitScale(targetUnit);
+    impact+=(result.cumulativeImpact[index]||0)*factor;used++;
+  });
+  return used?impact:null;
 }
 
 function normalizedRange(range: string) { return range.replace(/^'|'(?=!)/g, "").replace(/''/g, "'").toLowerCase(); }
@@ -268,7 +305,10 @@ export default function Home() {
       const base=modelSnapshot(scan,selectedEntity,last),targetUnit=groupCashRow?.unit||"model units";
       const revenue=convertedSeries(preferredSeries(scan,selectedEntity,[/^total billings$/i,/gross sales invoiced/i,/^revenue$|net revenue|sales revenue/i]),targetUnit,scan.periods.length)[last]||0;
       const costs=convertedSeries(preferredSeries(scan,selectedEntity,[/^total purchases$/i,/gross procurement invoiced/i,/^cogs$|cost of goods|direct costs/i]),targetUnit,scan.periods.length)[last]||0;
-      const workingCapitalImpact=-(nextDrivers.dso-baselineDrivers.dso)*revenue/30.4+(nextDrivers.dpo-baselineDrivers.dpo)*costs/30.4-(nextDrivers.dio-baselineDrivers.dio)*costs/30.4;
+      const dsoDelta=nextDrivers.dso-baselineDrivers.dso,dpoDelta=nextDrivers.dpo-baselineDrivers.dpo;
+      const dsoImpact=dsoDelta?portfolioScheduleImpact(scan,"dso",dsoDelta,last,targetUnit):0;
+      const dpoImpact=dpoDelta?portfolioScheduleImpact(scan,"dpo",dpoDelta,last,targetUnit):0;
+      const workingCapitalImpact=(dsoImpact??-dsoDelta*revenue/30.4)+(dpoImpact??dpoDelta*costs/30.4)-(nextDrivers.dio-baselineDrivers.dio)*costs/30.4;
       const totalImpact=workingCapitalImpact+customImpact,unconstrainedCash=base.cash===null?null:base.cash+totalImpact;
       const hasLiquidityPlug=scan.rows.some((row)=>/revolver.*drawdown.*plug|automatic.*revolver|financing plug/i.test(`${row.label} ${row.section}`));
       const minimumCash=convertedSeries(preferredSeries(scan,selectedEntity,[/^minimum cash(?: buffer)?$/i,/minimum liquidity/i]),targetUnit,scan.periods.length)[last]||0;
@@ -339,7 +379,15 @@ export default function Home() {
       const hasLiquidityPlug=scan.rows.some((row)=>/revolver.*drawdown.*plug|automatic.*revolver|financing plug/i.test(`${row.label} ${row.section}`));
       const customImpact=nextLevers.reduce((total,lever)=>total+(lever.value-lever.base)*lever.impact,0);
       const dsoDelta=dr.dso-baselineDrivers.dso,dpoDelta=dr.dpo-baselineDrivers.dpo,dioDelta=dr.dio-baselineDrivers.dio;
-      series=scenarioCashPath(baseCash,billings,purchases,{dso:dsoDelta,dpo:dpoDelta,dio:dioDelta,custom:customImpact},hasLiquidityPlug?{minimumCash,revolverBalance}:undefined).slice(start,last+1);
+      series=baseCash.map((base,index)=>{
+        const dsoImpact=dsoDelta?portfolioScheduleImpact(scan,"dso",dsoDelta,index,targetUnit):0;
+        const dpoImpact=dpoDelta?portfolioScheduleImpact(scan,"dpo",dpoDelta,index,targetUnit):0;
+        const impact=(dsoImpact??-dsoDelta*(billings[index]||0)/30.4)+(dpoImpact??dpoDelta*(purchases[index]||0)/30.4)-dioDelta*(purchases[index]||0)/30.4+customImpact;
+        const unconstrained=base+impact;
+        if(!hasLiquidityPlug)return unconstrained;
+        if(impact<0)return Math.max(minimumCash[index]??-Infinity,unconstrained);
+        return base+Math.max(0,impact-Math.max(0,revolverBalance[index]||0));
+      }).slice(start,last+1);
     }else series=calculate(data,dr,openingCash).cash.slice(start,last+1);
     return { out, series };
   }
