@@ -403,6 +403,10 @@ export default function Home() {
         return base+Math.max(0,impact-Math.max(0,revolverBalance[index]||0));
       }).slice(start,last+1);
     }else series=calculate(data,dr,openingCash).cash.slice(start,last+1);
+    const hasUnverifiedWorkbookChange=!!scan&&((Object.keys(dr) as DriverKey[]).some((key)=>dr[key]!==baselineDrivers[key])||nextLevers.some((lever)=>lever.value!==lever.base));
+    if(hasUnverifiedWorkbookChange){
+      return {out:{...out,closing_cash:null,runway_months:null,monthly_burn_rate:null,operating_cash_flow:null,net_cash_movement:null},series:series.map(()=>Number.NaN)};
+    }
     return { out, series };
   }
 
