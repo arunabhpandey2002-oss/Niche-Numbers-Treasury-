@@ -73,11 +73,11 @@ function CompareChart({ series, names, periods, money, connected }: { series: nu
         <text x={W - padR} y="244" textAnchor="end" className="sc-axis">{periods[periods.length - 1] || "End"}</text>
       </svg>
       <div className="sc-legend">
-        {names.map((name, i) => (
-          <span key={i}><i style={{ background: COLORS[i % COLORS.length] }} />{name} · <b>{money(chartSeries[i]?.findLast((value)=>value!==null) ?? 0)}</b></span>
-        ))}
+        {names.map((name, i) => {const lastValue=chartSeries[i]?.findLast((value)=>value!==null);return (
+          <span key={i}><i style={{ background: COLORS[i % COLORS.length] }} />{name} · <b>{lastValue==null?"Verify via write-back":money(lastValue)}</b></span>
+        )})}
       </div>
-      {connected&&<p className="sc-chart-note"><b>Preview only.</b> Base is read from the workbook, but comparison paths do not execute the workbook formulas. Use the chat&rsquo;s confirmed write-back flow to obtain an exact, recalculated Google Sheets result.</p>}
+      {connected&&<p className="sc-chart-note"><b>Workbook-safe comparison.</b> The base path is read from Google Sheets. Changed scenarios show operational outputs such as the cash-conversion cycle, but cash, runway and operating results remain unverified until you use the chat&rsquo;s confirmed write-back flow.</p>}
     </div>
   );
 }
